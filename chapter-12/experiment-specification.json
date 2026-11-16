@@ -1,0 +1,630 @@
+{
+  "experiment_id": "ch12-metrics-reporting-bridge-tech-risk-v1",
+  "hypothesis": "A structured, risk-centric reporting pipeline that aggregates model-level detection logs into stakeholder-specific dashboards and automated reports will more effectively support policy, compliance, and executive decision-making than raw technical metrics alone, as measured by improved risk-aligned metric coverage and reduced ambiguity in incident and cohort summaries.",
+  "baseline": {
+    "description": "Technical-metrics-only reporting directly from model evaluation logs.",
+    "reporting_flow": "Model inference -> raw logs (per-item predictions, scores, labels) -> static evaluation script -> single technical report (e.g., overall ROC/AUC, precision, recall, confusion matrix) without cohort breakdowns or explicit risk framing.",
+    "artifacts": {
+      "input_logs_format": "Parquet/JSONL with fields: content_id, creator_id, upload_timestamp, geography, content_category, model_version, y_true, y_pred, score, attack_type (optional).",
+      "scripts": [
+        "experiments/ch12_metrics_reporting/baseline/compute_technical_metrics.py"
+      ],
+      "outputs": [
+        "experiments/ch12_metrics_reporting/baseline/outputs/metrics_overall.json",
+        "experiments/ch12_metrics_reporting/baseline/outputs/metrics_overall.csv"
+      ]
+    },
+    "stakeholder_view": "Single aggregated view primarily understandable to ML engineers; no explicit mapping to risk tiers, regulatory thresholds, or incident narratives."
+  },
+  "treatment": {
+    "description": "Risk-centric, stakeholder-specific metrics and automated reporting built on top of the same underlying logs.",
+    "reporting_flow": "Model inference -> enriched logs (technical + policy metadata) -> metrics pipeline -> (1) cohort-based risk dashboards, (2) incident retrospectives, (3) executive/compliance summary reports with explicit uncertainty and limitations sections.",
+    "components": {
+      "metric_layer": "Transforms raw predictions into risk-centric metrics (e.g., risk-weighted false negatives per million items, cohort-specific detection coverage, incident backlog latency).",
+      "cohort_analysis": "Breakdowns by geography, content_category, creator_segment, and attack_type (where available).",
+      "report_generators": {
+        "compliance_report": "Regulator-facing PDF/HTML with quarterly metrics, SLAs, and incident summaries.",
+        "t_and_s_dashboard": "CSV/Parquet/Markdown outputs suitable for BI tools (e.g., per-cohort confusion matrices, trends).",
+        "executive_brief": "Markdown/HTML 1\u20132 page briefing with key KPIs, trend charts (links), and limitations section."
+      },
+      "artifacts": {
+        "scripts": [
+          "experiments/ch12_metrics_reporting/treatment/compute_risk_metrics.py",
+          "experiments/ch12_metrics_reporting/treatment/generate_cohort_reports.py",
+          "experiments/ch12_metrics_reporting/treatment/generate_incident_retrospectives.py",
+          "experiments/ch12_metrics_reporting/treatment/generate_executive_summary.py"
+        ],
+        "templates": [
+          "experiments/ch12_metrics_reporting/templates/compliance_report.md.j2",
+          "experiments/ch12_metrics_reporting/templates/executive_summary.md.j2",
+          "experiments/ch12_metrics_reporting/templates/incident_postmortem.md.j2"
+        ],
+        "outputs_dir": "experiments/ch12_metrics_reporting/treatment/outputs/"
+      }
+    },
+    "stakeholder_view": "Multiple tailored outputs that explicitly connect detection performance to risk categories, SLAs, and regulatory expectations, and that surface uncertainty and limitations."
+  },
+  "workloads": [
+    {
+      "name": "offline_model_evaluation_logs",
+      "description": "Historical or simulated detection logs from Chapters 5\u201310 experiments, enriched with metadata suitable for cohort analysis.",
+      "input_source": "experiments/shared_data/detection_logs/",
+      "characteristics": {
+        "size": "At least 100k content items with mixed watermarked, clean, and watermark-removed examples.",
+        "schema": {
+          "content_id": "string",
+          "creator_id": "string",
+          "upload_timestamp": "datetime (ISO 8601)",
+          "geography": "string (ISO 3166-1 alpha-2 country code)",
+          "content_category": "string (e.g., 'news', 'entertainment', 'politics', 'user_generated')",
+          "creator_segment": "string (e.g., 'high_reach', 'long_tail', 'new_creator')",
+          "model_version": "string (semantic versioning)",
+          "attack_type": "string or null (e.g., 'compression', 'diffusion_resynthesis', 'crop_blur', 'none')",
+          "y_true": "int (0 = no removal, 1 = watermark removed/tampered)",
+          "y_pred": "int (0/1 predicted)",
+          "score": "float (model confidence or logit)",
+          "in_high_risk_workflow": "bool (whether content is subject to stricter policy)",
+          "policy_outcome": "string (e.g., 'allowed', 'labelled', 'blocked', 'escalated')"
+        }
+      }
+    },
+    {
+      "name": "incident_case_study_logs",
+      "description": "Focused subset of logs around known or simulated detection failures to exercise incident reporting templates.",
+      "input_source": "experiments/shared_data/incidents/",
+      "characteristics": {
+        "size": "O(10^3\u201310^4) items covering at least 3 distinct incidents.",
+        "annotation": {
+          "incident_id": "string",
+          "incident_severity": "string (e.g., 'sev1', 'sev2', 'sev3')",
+          "incident_window_start": "datetime",
+          "incident_window_end": "datetime",
+          "ground_truth_discovered_at": "datetime",
+          "manual_review_flag": "bool"
+        }
+      }
+    }
+  ],
+  "controls": {
+    "data_consistency": "Use identical underlying logs for both baseline and treatment; do not modify y_true, y_pred, score.",
+    "time_window": "Fix a common evaluation window (e.g., last 30 days in logs) for all metric computations.",
+    "cohort_definitions": "Maintain a single YAML/JSON configuration file (`experiments/ch12_metrics_reporting/config/cohorts.yaml`) defining segment boundaries (e.g., which geographies are 'regulated_markets').",
+    "risk_weighting": "Use a shared risk-weight configuration file (`risk_weights.yaml`) for mapping content_category, geography, and creator_segment to risk weights; do not tune separately for baseline vs. treatment.",
+    "randomness": "Any sampling (e.g., for example incidents in reports) must set a deterministic seed via common configuration (`seed: 12345`).",
+    "execution_environment": "Run baseline and treatment pipelines using the same environment, dependency versions, and hardware type.",
+    "logging": "Log run metadata (git commit, config hash, timestamps) in both baseline and treatment outputs via a shared utility module."
+  },
+  "metrics": [
+    {
+      "name": "overall_technical_precision",
+      "unit": "fraction (0\u20131)",
+      "definition": "Precision over full dataset: TP / (TP + FP), computed from y_true and y_pred.",
+      "purpose": "Baseline technical performance comparator."
+    },
+    {
+      "name": "overall_technical_recall",
+      "unit": "fraction (0\u20131)",
+      "definition": "Recall over full dataset: TP / (TP + FN).",
+      "purpose": "Baseline technical performance comparator."
+    },
+    {
+      "name": "risk_weighted_false_negative_rate",
+      "unit": "weighted_fraction (0\u20131)",
+      "definition": "Sum over items of risk_weight * FN_indicator divided by sum over items of risk_weight; risk_weight derived from risk_weights.yaml using geography, content_category, creator_segment, and in_high_risk_workflow.",
+      "purpose": "Captures the effective risk of missed watermark-removal cases."
+    },
+    {
+      "name": "high_risk_segment_recall",
+      "unit": "fraction (0\u20131)",
+      "definition": "Recall restricted to high-risk segments as defined in cohorts.yaml (e.g., regulated geographies + sensitive categories).",
+      "purpose": "Measures protection level where policy stakes are highest."
+    },
+    {
+      "name": "num_cohorts_with_kpis",
+      "unit": "count",
+      "definition": "Number of distinct (geography, content_category, creator_segment) cohorts for which the pipeline outputs precision, recall, volume, and risk-weighted FN metrics.",
+      "purpose": "Measures coverage of cohort analysis capability."
+    },
+    {
+      "name": "report_metric_coverage_score",
+      "unit": "fraction (0\u20131)",
+      "definition": "Fraction of predefined stakeholder questions (enumerated in a configuration file, e.g., 20 items) that can be answered directly from generated reports without recomputation. This is computed by a static checker that verifies presence of required fields/aggregations.",
+      "purpose": "Operational proxy for how well reporting meets stakeholder informational needs."
+    },
+    {
+      "name": "incident_detection_latency_median",
+      "unit": "seconds",
+      "definition": "Median time from first incorrect prediction in an incident window (FN on y_true=1) to inclusion of that pattern in an incident report, approximated from timestamps in incident_case_study_logs and report metadata.",
+      "purpose": "Measures responsiveness of the reporting pipeline for incident analysis."
+    },
+    {
+      "name": "uncertainty_documentation_presence",
+      "unit": "binary (0/1)",
+      "definition": "Indicator that generated reports contain an explicit 'Limitations and Uncertainty' section with at least N (e.g., 3) predefined caveat types populated.",
+      "purpose": "Checks responsible communication of limitations."
+    },
+    {
+      "name": "compliance_kpi_alignment_score",
+      "unit": "fraction (0\u20131)",
+      "definition": "Fraction of compliance-defined KPIs (e.g., 'FN per million items in EU news category', 'SLA adherence for Sev1 incidents') that are present as numeric fields in the compliance report output. KPIs specified in a separate config file consumed by a static validator.",
+      "purpose": "Measures alignment between technical reporting and compliance requirements."
+    },
+    {
+      "name": "execution_runtime",
+      "unit": "seconds",
+      "definition": "Wall-clock time to generate full set of reports on the offline_model_evaluation_logs workload.",
+      "purpose": "Evaluates operational feasibility of the pipeline."
+    },
+    {
+      "name": "pipeline_failure_rate",
+      "unit": "fraction (0\u20131)",
+      "definition": "Fraction of report generation runs that terminate with a non-zero exit code or incomplete outputs across repeated executions (e.g., N=5 runs).",
+      "purpose": "Measures robustness and reproducibility of the reporting pipeline."
+    }
+  ],
+  "success_criteria": {
+    "primary": [
+      {
+        "metric": "num_cohorts_with_kpis",
+        "comparison": "treatment_vs_baseline",
+        "threshold": "treatment must provide at least 5x the number of cohorts with full KPI sets compared to baseline.",
+        "justification": "Indicates substantially richer cohort/risk segmentation."
+      },
+      {
+        "metric": "report_metric_coverage_score",
+        "comparison": "absolute",
+        "threshold": "treatment >= 0.8 on stakeholder-question checklist (baseline is expected to be < 0.4).",
+        "justification": "Shows that treatment reports answer most pre-specified stakeholder questions directly."
+      },
+      {
+        "metric": "compliance_kpi_alignment_score",
+        "comparison": "absolute",
+        "threshold": "treatment >= 0.75 and strictly greater than baseline.",
+        "justification": "Ensures alignment with compliance KPIs, not just increased volume of metrics."
+      }
+    ],
+    "secondary": [
+      {
+        "metric": "incident_detection_latency_median",
+        "comparison": "treatment_vs_baseline",
+        "threshold": "treatment median latency <= 0.5 * baseline latency, or absolute median <= 24 hours if baseline does not support automated incident views.",
+        "justification": "Faster incident surfacing in risk-oriented reporting."
+      },
+      {
+        "metric": "uncertainty_documentation_presence",
+        "comparison": "absolute",
+        "threshold": "treatment == 1; baseline may be 0 or 1 but is not required.",
+        "justification": "Enforces responsible communication of limitations."
+      },
+      {
+        "metric": "execution_runtime",
+        "comparison": "absolute",
+        "threshold": "treatment runtime <= 2x baseline runtime on the same hardware and workload.",
+        "justification": "Prevents excessive operational cost from richer reporting."
+      },
+      {
+        "metric": "pipeline_failure_rate",
+        "comparison": "absolute",
+        "threshold": "pipeline_failure_rate <= 0.1 over at least 5 repeated runs for both baseline and treatment.",
+        "justification": "Requires a reasonably stable, reproducible pipeline."
+      }
+    ],
+    "interpretation_notes": "Success is defined primarily by improved risk- and stakeholder-aligned reporting capabilities, not by changes in underlying model quality. If treatment marginally increases runtime but meets or exceeds other thresholds, it is still considered successful."
+  },
+  "failure_modes": [
+    {
+      "name": "misaligned_cohort_definitions",
+      "description": "Cohort labels in logs (e.g., geography, content_category) do not match those expected by cohorts.yaml, leading to missing or incorrect cohort metrics.",
+      "detection": "Validation script (`validate_cohorts.py`) raises schema or value mismatch warnings; num_cohorts_with_kpis unexpectedly low.",
+      "mitigation": "Add mapping layer or update cohorts.yaml to reflect actual values in logs; rerun pipelines."
+    },
+    {
+      "name": "incomplete_risk_weight_configuration",
+      "description": "Some items lack defined risk_weight, causing them to be dropped or defaulted to zero in risk-weighted metrics.",
+      "detection": "Logs from compute_risk_metrics.py indicate proportion of items with default risk_weight; if >5%, flag experiment run as invalid.",
+      "mitigation": "Extend risk_weights.yaml to cover missing combinations; re-run metrics."
+    },
+    {
+      "name": "template_placeholder_leakage",
+      "description": "Generated reports still contain unresolved template placeholders (e.g., '{{ kpi_name }}'), which would confuse stakeholders.",
+      "detection": "Automated check searches outputs for '{{' or '}}' tokens; presence triggers failure.",
+      "mitigation": "Correct template variable names or ensure generator scripts populate all required context keys; rerun."
+    },
+    {
+      "name": "metric_inconsistency_between_layers",
+      "description": "Same metric (e.g., overall_technical_recall) computed by different scripts yields different values due to filtering or rounding differences.",
+      "detection": "Consistency test script compares shared metrics across baseline and treatment outputs; discrepancies beyond 1e-6 relative error flagged.",
+      "mitigation": "Refactor to centralized metric computation utilities; ensure both pipelines call the same functions."
+    },
+    {
+      "name": "performance_regression",
+      "description": "Treatment reporting pipeline becomes too slow or resource-intensive to run regularly on realistic workloads.",
+      "detection": "execution_runtime > 2x baseline threshold or absolute runtime exceeds an operational budget (e.g., more than 2 hours on sample workload).",
+      "mitigation": "Profile bottlenecks, implement caching and incremental aggregation, or reduce report granularity while preserving key risk metrics."
+    },
+    {
+      "name": "poor_incident_coverage",
+      "description": "Incident retrospectives fail to surface known failure cases due to faulty incident-window logic or filtering.",
+      "detection": "Manual spot-check: specific incident_ids known to contain FNs are missing from generated incident reports; automated test ensures at least one FN-linked item per incident_id is included.",
+      "mitigation": "Adjust incident-window detection rules and ensure that FN patterns are explicitly queried; add unit tests for representative incidents."
+    },
+    {
+      "name": "under-communicated_limitations",
+      "description": "Reports omit or minimize key known limitations (e.g., specific attack types where recall is poor), leading to overconfidence in stakeholders.",
+      "detection": "uncertainty_documentation_presence == 0 or static validator finds less than required number of caveats populated.",
+      "mitigation": "Expand limitations section in templates and link them to metric thresholds (e.g., auto-insert caveat when recall < X for a cohort)."
+    }
+  ],
+  "required_environment": {
+    "hardware": {
+      "cpu": "x86_64 with at least 4 cores",
+      "memory_gb": 16,
+      "gpu": "Not required; experiment is CPU-bound though GPU is acceptable.",
+      "disk_space_gb": 20
+    },
+    "software": {
+      "os": "Linux (Ubuntu 20.04+ recommended) or macOS 12+; Windows via WSL2 is acceptable.",
+      "python": "Python 3.10+",
+      "dependencies": [
+        "pandas>=2.0.0",
+        "numpy>=1.24.0",
+        "pyarrow>=12.0.0",
+        "matplotlib>=3.7.0",
+        "seaborn>=0.12.0",
+        "jinja2>=3.1.0",
+        "pydantic>=2.0.0",
+        "typer>=0.9.0",
+        "pyyaml>=6.0.0",
+        "pytest>=7.0.0"
+      ],
+      "environment_files": [
+        "environment.yml",
+        "requirements.txt"
+      ]
+    },
+    "repository_layout": {
+      "root": "https://github.com/bookauthority/ai-watermark-removal-detection",
+      "paths": [
+        "experiments/ch12_metrics_reporting/baseline/",
+        "experiments/ch12_metrics_reporting/treatment/",
+        "experiments/ch12_metrics_reporting/config/",
+        "experiments/ch12_metrics_reporting/templates/",
+        "experiments/shared_data/detection_logs/",
+        "experiments/shared_data/incidents/"
+      ]
+    },
+    "configuration": {
+      "cohorts_file": "experiments/ch12_metrics_reporting/config/cohorts.yaml",
+      "risk_weights_file": "experiments/ch12_metrics_reporting/config/risk_weights.yaml",
+      "stakeholder_questions_file": "experiments/ch12_metrics_reporting/config/stakeholder_questions.yaml",
+      "compliance_kpis_file": "experiments/ch12_metrics_reporting/config/compliance_kpis.yaml",
+      "global_seed": 12345
+    }
+  },
+  "run_instructions": [
+    "1. Clone the repository:\n   git clone https://github.com/bookauthority/ai-watermark-removal-detection.git\n   cd ai-watermark-removal-detection",
+    "2. Create and activate the environment (example using conda):\n   conda env create -f environment.yml\n   conda activate ai-watermark-removal-detection\n   # Or use: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt",
+    "3. Ensure shared data is available. If not present, generate or download sample logs as documented in `experiments/shared_data/README.md`:\n   # Example (if provided by repo):\n   python experiments/shared_data/generate_sample_detection_logs.py \\\n       --output-dir experiments/shared_data/detection_logs/\n   python experiments/shared_data/generate_sample_incident_logs.py \\\n       --output-dir experiments/shared_data/incidents/",
+    "4. Inspect and, if necessary, adjust configuration files to match your environment and risk taxonomy:\n   - experiments/ch12_metrics_reporting/config/cohorts.yaml\n   - experiments/ch12_metrics_reporting/config/risk_weights.yaml\n   - experiments/ch12_metrics_reporting/config/stakeholder_questions.yaml\n   - experiments/ch12_metrics_reporting/config/compliance_kpis.yaml\n   Do not change cohort or risk definitions between baseline and treatment when comparing runs.",
+    "5. Run baseline technical metrics pipeline:\n   python experiments/ch12_metrics_reporting/baseline/compute_technical_metrics.py \\\n       --logs-dir experiments/shared_data/detection_logs/ \\\n       --output-dir experiments/ch12_metrics_reporting/baseline/outputs/ \\\n       --seed 12345",
+    "6. Verify baseline outputs:\n   - Check that `metrics_overall.json` and/or `metrics_overall.csv` exist in the baseline outputs directory.\n   - Optionally, run baseline smoke tests: `pytest experiments/ch12_metrics_reporting/baseline/tests/`",
+    "7. Run treatment risk-centric metrics and reporting pipeline (may be provided as an orchestrating CLI):\n   python experiments/ch12_metrics_reporting/treatment/run_full_reporting_pipeline.py \\\n       --logs-dir experiments/shared_data/detection_logs/ \\\n       --incidents-dir experiments/shared_data/incidents/ \\\n       --config-dir experiments/ch12_metrics_reporting/config/ \\\n       --templates-dir experiments/ch12_metrics_reporting/templates/ \\\n       --output-dir experiments/ch12_metrics_reporting/treatment/outputs/ \\\n       --seed 12345",
+    "8. Verify treatment outputs:\n   - Expect files such as:\n     * `risk_metrics_overall.json`\n     * `cohort_metrics.csv`\n     * `compliance_report.html` or `.md`\n     * `executive_summary.html` or `.md`\n     * `incident_reports/incident_<id>.md`\n   - Optionally, run treatment smoke tests: `pytest experiments/ch12_metrics_reporting/treatment/tests/`",
+    "9. Compute experiment metrics and compare baseline vs. treatment via a dedicated evaluation script:\n   python experiments/ch12_metrics_reporting/evaluate_reporting_experiment.py \\\n       --baseline-dir experiments/ch12_metrics_reporting/baseline/outputs/ \\\n       --treatment-dir experiments/ch12_metrics_reporting/treatment/outputs/ \\\n       --incidents-dir experiments/shared_data/incidents/ \\\n       --config-dir experiments/ch12_metrics_reporting/config/ \\\n       --output-file experiments/ch12_metrics_reporting/evaluation_summary.json",
+    "10. Inspect `evaluation_summary.json` for all defined experiment metrics and an auto-generated verdict with respect to the success_criteria. Confirm that:\n    - num_cohorts_with_kpis is substantially larger for treatment than baseline.\n    - report_metric_coverage_score and compliance_kpi_alignment_score meet thresholds.\n    - incident_detection_latency_median, if computable, is acceptable.\n    - uncertainty_documentation_presence == 1 and pipeline_failure_rate <= 0.1.",
+    "11. (Optional) Integrate outputs into a BI/dashboarding tool. For example, import `cohort_metrics.csv` into your preferred dashboard platform to visualize geography/content-category risk surfaces for stakeholders, ensuring that these visualizations are directly traceable to the treatment reporting pipeline."
+  ],
+  "evidence_schema": {
+    "type": "object",
+    "description": "Schema for capturing the outputs of the experiment in a way that supports chapter 12's goals of rigorous, reproducible reporting to both technical and non-technical stakeholders.",
+    "properties": {
+      "run_metadata": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string"
+          },
+          "timestamp_utc": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "git_commit": {
+            "type": "string",
+            "description": "Short hash of the repository commit used for this run."
+          },
+          "config_hash": {
+            "type": "string",
+            "description": "Hash derived from cohorts, risk_weights, and KPI configuration files."
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "environment": {
+            "type": "object",
+            "properties": {
+              "python_version": {
+                "type": "string"
+              },
+              "os": {
+                "type": "string"
+              },
+              "cpu_info": {
+                "type": "string"
+              },
+              "memory_gb": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "python_version",
+              "os"
+            ]
+          }
+        },
+        "required": [
+          "experiment_id",
+          "timestamp_utc",
+          "git_commit",
+          "config_hash",
+          "seed"
+        ]
+      },
+      "dataset_characteristics": {
+        "type": "object",
+        "properties": {
+          "num_items_total": {
+            "type": "integer"
+          },
+          "time_window_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "time_window_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "num_incidents": {
+            "type": "integer"
+          },
+          "cohort_distribution": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "cohort_id": {
+                  "type": "string"
+                },
+                "geography": {
+                  "type": "string"
+                },
+                "content_category": {
+                  "type": "string"
+                },
+                "creator_segment": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "cohort_id",
+                "count"
+              ]
+            }
+          }
+        },
+        "required": [
+          "num_items_total"
+        ]
+      },
+      "baseline_metrics": {
+        "type": "object",
+        "properties": {
+          "overall_technical_precision": {
+            "type": "number"
+          },
+          "overall_technical_recall": {
+            "type": "number"
+          },
+          "execution_runtime": {
+            "type": "number"
+          },
+          "pipeline_failure_rate": {
+            "type": "number"
+          },
+          "num_cohorts_with_kpis": {
+            "type": "integer"
+          },
+          "report_metric_coverage_score": {
+            "type": "number"
+          },
+          "compliance_kpi_alignment_score": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "overall_technical_precision",
+          "overall_technical_recall"
+        ]
+      },
+      "treatment_metrics": {
+        "type": "object",
+        "properties": {
+          "overall_technical_precision": {
+            "type": "number"
+          },
+          "overall_technical_recall": {
+            "type": "number"
+          },
+          "risk_weighted_false_negative_rate": {
+            "type": "number"
+          },
+          "high_risk_segment_recall": {
+            "type": "number"
+          },
+          "num_cohorts_with_kpis": {
+            "type": "integer"
+          },
+          "report_metric_coverage_score": {
+            "type": "number"
+          },
+          "incident_detection_latency_median": {
+            "type": "number"
+          },
+          "uncertainty_documentation_presence": {
+            "type": "integer"
+          },
+          "compliance_kpi_alignment_score": {
+            "type": "number"
+          },
+          "execution_runtime": {
+            "type": "number"
+          },
+          "pipeline_failure_rate": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "overall_technical_precision",
+          "overall_technical_recall",
+          "risk_weighted_false_negative_rate",
+          "num_cohorts_with_kpis",
+          "report_metric_coverage_score",
+          "compliance_kpi_alignment_score"
+        ]
+      },
+      "cohort_metrics_sample": {
+        "type": "array",
+        "description": "Sample of per-cohort metrics to be used in the chapter as illustrative tables or figures.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "cohort_id": {
+              "type": "string"
+            },
+            "geography": {
+              "type": "string"
+            },
+            "content_category": {
+              "type": "string"
+            },
+            "creator_segment": {
+              "type": "string"
+            },
+            "support": {
+              "type": "integer",
+              "description": "Number of items in this cohort."
+            },
+            "precision": {
+              "type": "number"
+            },
+            "recall": {
+              "type": "number"
+            },
+            "risk_weighted_false_negative_rate": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "cohort_id",
+            "support"
+          ]
+        }
+      },
+      "incident_summaries": {
+        "type": "array",
+        "description": "Structured summaries of incidents used to validate incident reporting templates.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "incident_id": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "num_items": {
+              "type": "integer"
+            },
+            "num_false_negatives": {
+              "type": "integer"
+            },
+            "median_detection_latency_seconds": {
+              "type": "number"
+            },
+            "primary_cohort": {
+              "type": "string"
+            },
+            "dominant_attack_type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "incident_id",
+            "severity",
+            "num_items"
+          ]
+        }
+      },
+      "limitations_and_caveats": {
+        "type": "array",
+        "description": "List of limitations explicitly documented in the generated reports, to be used as examples in Section 12.5.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "description": "E.g., 'attack_coverage', 'geographic_bias', 'data_freshness'."
+            },
+            "description": {
+              "type": "string"
+            },
+            "associated_metric": {
+              "type": "string",
+              "description": "Name of a metric that triggers or motivates this caveat, if any."
+            }
+          },
+          "required": [
+            "category",
+            "description"
+          ]
+        }
+      },
+      "success_evaluation": {
+        "type": "object",
+        "description": "Machine-evaluable verdict of whether the experiment met its predefined success criteria.",
+        "properties": {
+          "primary_criteria_met": {
+            "type": "boolean"
+          },
+          "secondary_criteria_met": {
+            "type": "boolean"
+          },
+          "failed_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "notes": {
+            "type": "string",
+            "description": "Optional human-written summary interpreting metric outcomes and trade-offs."
+          }
+        },
+        "required": [
+          "primary_criteria_met",
+          "secondary_criteria_met",
+          "failed_criteria"
+        ]
+      }
+    },
+    "required": [
+      "run_metadata",
+      "dataset_characteristics",
+      "baseline_metrics",
+      "treatment_metrics",
+      "success_evaluation"
+    ]
+  }
+}

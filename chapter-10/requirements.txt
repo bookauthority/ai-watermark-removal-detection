@@ -1,0 +1,7 @@
+# Runtime requirements
+# --------------------
+#
+# The experiment is intentionally implemented using ONLY the Python
+# standard library. This file is present to satisfy tooling that
+# expects a requirements.txt, but no external packages are required.
+

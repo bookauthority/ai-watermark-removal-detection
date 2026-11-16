@@ -1,0 +1,8 @@
+default: 1.0
+weights:
+  US:news:high_reach: 1.5
+  DE:news:high_reach: 2.0
+  FR:news:high_reach: 2.0
+  DE:politics:high_reach: 2.5
+  FR:politics:high_reach: 2.5
+  IN:politics:long_tail: 1.2

@@ -1,0 +1,886 @@
+{
+  "experiment_id": "exp-ch11-arch-deploy-watermark-detection-v1",
+  "hypothesis": "A containerized microservice architecture with a dedicated feature service, async queue-based ingress, and auto-scaled GPU model-serving pods (\"treatment\") can provide materially better end-to-end latency predictability, error isolation, and operational observability for watermark removal detection at platform scale than a simpler monolithic API deployment with in-process preprocessing and model inference (\"baseline\"), under comparable workloads and hardware budgets.",
+  "baseline": {
+    "description": "Monolithic detection API service with in-process preprocessing and model inference, directly exposed to clients.",
+    "architecture": {
+      "components": [
+        "Single containerized web API (e.g., FastAPI/uvicorn) exposing `/detect` endpoint over HTTP/JSON.",
+        "In-process image preprocessing (decode, resize, normalization) implemented in Python.",
+        "In-process model inference using a pre-loaded image watermark-removal detector (CPU or single GPU).",
+        "Synchronous writes from the API to a relational database (e.g., PostgreSQL) for logging and audit events.",
+        "Simple service-level metrics via application logging and a basic Prometheus exporter embedded in the API.",
+        "No separate feature store or feature service; features are computed ad hoc per request."
+      ],
+      "deployment": {
+        "containerization": "Single Docker image `wm-detector-monolith`.",
+        "orchestration": "docker-compose with a single replica of the API service plus a PostgreSQL container and a Prometheus container.",
+        "networking": "Client requests -> Nginx reverse proxy (optional) -> API container.",
+        "scaling": "Vertical scaling only (more CPU/GPU per container); no horizontal auto-scaling."
+      },
+      "data_flow": {
+        "ingress": "Client sends image (binary or base64) and metadata directly to `/detect`.",
+        "processing": "API decodes image, applies preprocessing, performs model inference.",
+        "decision": "API returns detection score and label synchronously within the same HTTP response.",
+        "logging": "API writes raw request metadata, model scores, and decision to PostgreSQL in the synchronous request path.",
+        "audit": "Audit queries read from PostgreSQL; no separate audit event stream."
+      }
+    }
+  },
+  "treatment": {
+    "description": "Modular microservice architecture separating ingestion, feature extraction, model serving, and logging/audit, deployed as containerized services backed by a message queue and auto-scaled GPU inference workers.",
+    "architecture": {
+      "components": [
+        "Ingress Gateway Service (`ingress-gw`): lightweight HTTP/JSON API for `/detect` and `/health`, responsible only for authentication, basic validation, and enqueueing detection jobs.",
+        "Detection Queue (`detect-queue`): durable message broker (e.g., Redis Streams or RabbitMQ) buffering detection jobs between ingress and workers.",
+        "Preprocessing & Feature Service (`feature-svc`): stateless workers consuming from `detect-queue`, performing image decode, normalization, and optional forensic feature extraction, then writing feature vectors and metadata to an online feature store.",
+        "Model Serving Service (`model-svc`): GPU-accelerated microservice exposing a gRPC/HTTP inference endpoint, consuming either raw images from `detect-queue` or precomputed features from `feature-svc`/feature store, returning scores and labels.",
+        "Aggregation & Response Service (`aggregator-svc`): correlates ingress requests with detection outputs (from `model-svc` via internal queue or callback), applies business logic (thresholds, policies) and returns responses to clients via callback or polling API.",
+        "Moderation Integration Service (`moderation-sink`): subscribes to detection decisions and pushes structured events into a simulated moderation system (e.g., Kafka topic or dedicated PostgreSQL schema) for downstream review tools.",
+        "Logging & Audit Service (`audit-log-svc`): independent write-only service receiving append-only detection and decision logs (via HTTP/gRPC or Kafka) and persisting them to PostgreSQL, minimizing coupling between online path and audit storage.",
+        "Observability Stack: Prometheus + Grafana containers collecting metrics from all services; structured JSON logging shipped to a local log aggregator (e.g., Loki or file-based sink)."
+      ],
+      "deployment": {
+        "containerization": "Separate Docker images for each service: `ingress-gw`, `feature-svc`, `model-svc`, `aggregator-svc`, `moderation-sink`, `audit-log-svc`, `queue-broker`, `postgres`, `prometheus`, `grafana`.",
+        "orchestration": "docker-compose-based reference deployment with configurable replica counts for `feature-svc` and `model-svc` to emulate horizontal scaling; optional Kubernetes manifests for cluster environments.",
+        "networking": "Client -> `ingress-gw` (HTTP) -> `detect-queue`; internal services communicate via queues and internal service mesh (compose network). `model-svc` exposes gRPC/HTTP to `feature-svc`/`aggregator-svc` only.",
+        "scaling": "Horizontal scaling knobs on `model-svc` and `feature-svc` (multiple replicas) with synthetic auto-scaling policies (triggered in experiments by queue depth or CPU/GPU utilization)."
+      },
+      "data_flow": {
+        "real_time_path": [
+          "Client issues `/detect` request to `ingress-gw` with image reference or payload.",
+          "`ingress-gw` enqueues job into `detect-queue` and returns a correlation ID.",
+          "`feature-svc` consumes jobs, performs preprocessing/feature extraction, and forwards a model-ready payload to `model-svc` (sync) or a `model-input` queue (async).",
+          "`model-svc` runs detector inference on GPU and publishes results to a `results` stream.",
+          "`aggregator-svc` consumes from `results`, applies thresholding/policy logic, and emits structured decision events to both `moderation-sink` and `audit-log-svc`.",
+          "Client retrieves final decision via `GET /detect/{correlation_id}` or via a callback webhook (simulated in experiments)."
+        ],
+        "batch_path": [
+          "Batch job generator enqueues detection tasks for a directory or manifest of images.",
+          "Same internal pipeline as above, but latency SLOs are relaxed and throughput/efficiency metrics emphasized."
+        ]
+      }
+    }
+  },
+  "workloads": [
+    {
+      "name": "wl1-real-time-low-rps",
+      "description": "Low throughput, latency-sensitive real-time detection workload emulating a smaller platform or early-stage rollout.",
+      "traffic_pattern": {
+        "type": "poisson",
+        "requests_per_second": 5,
+        "duration_minutes": 20,
+        "burstiness": "low"
+      },
+      "content_profile": {
+        "media_mix": {
+          "image_jpeg": 0.7,
+          "image_png": 0.3
+        },
+        "resolution_distribution": {
+          "640x480": 0.4,
+          "1080p": 0.5,
+          "4k": 0.1
+        },
+        "watermark_status_mix": {
+          "watermarked_intact": 0.4,
+          "watermarked_removed": 0.4,
+          "never_watermarked": 0.2
+        }
+      },
+      "access_pattern": {
+        "sync_requests": 1.0,
+        "max_concurrent_clients": 20
+      }
+    },
+    {
+      "name": "wl2-real-time-bursty-high-rps",
+      "description": "High-throughput, bursty real-time workload approximating peak upload times on a large platform.",
+      "traffic_pattern": {
+        "type": "mixed",
+        "base_rps": 50,
+        "peak_rps": 200,
+        "burst_period_seconds": 120,
+        "idle_period_seconds": 60,
+        "duration_minutes": 30,
+        "burstiness": "high"
+      },
+      "content_profile": {
+        "media_mix": {
+          "image_jpeg": 0.8,
+          "image_png": 0.2
+        },
+        "resolution_distribution": {
+          "720p": 0.3,
+          "1080p": 0.5,
+          "4k": 0.2
+        },
+        "watermark_status_mix": {
+          "watermarked_intact": 0.3,
+          "watermarked_removed": 0.5,
+          "never_watermarked": 0.2
+        }
+      },
+      "access_pattern": {
+        "sync_requests": 1.0,
+        "max_concurrent_clients": 200
+      }
+    },
+    {
+      "name": "wl3-batch-backfill",
+      "description": "Batch processing workload representing backfill re-scoring of an historical content corpus.",
+      "traffic_pattern": {
+        "type": "batch",
+        "total_items": 100000,
+        "submission_mode": "enqueue_all_at_start",
+        "duration_target_minutes": 60
+      },
+      "content_profile": {
+        "media_mix": {
+          "image_jpeg": 0.9,
+          "image_png": 0.1
+        },
+        "resolution_distribution": {
+          "480p": 0.2,
+          "720p": 0.4,
+          "1080p": 0.3,
+          "4k": 0.1
+        },
+        "watermark_status_mix": {
+          "watermarked_intact": 0.25,
+          "watermarked_removed": 0.5,
+          "never_watermarked": 0.25
+        }
+      },
+      "access_pattern": {
+        "sync_requests": 0.0,
+        "async_jobs": 1.0,
+        "max_parallel_producers": 4
+      }
+    },
+    {
+      "name": "wl4-failure-injection",
+      "description": "Resilience and safe-rollout workload with induced faults (model crash, DB slowness, queue partition) to observe fallback behavior and availability.",
+      "traffic_pattern": {
+        "type": "poisson",
+        "requests_per_second": 20,
+        "duration_minutes": 30,
+        "burstiness": "medium"
+      },
+      "fault_injections": [
+        {
+          "time_offset_minutes": 5,
+          "component": "model-svc",
+          "fault_type": "crash-loop",
+          "duration_minutes": 5
+        },
+        {
+          "time_offset_minutes": 15,
+          "component": "postgres",
+          "fault_type": "artificial_latency",
+          "latency_ms": 500,
+          "duration_minutes": 5
+        },
+        {
+          "time_offset_minutes": 22,
+          "component": "detect-queue",
+          "fault_type": "network_partition",
+          "duration_minutes": 3
+        }
+      ],
+      "content_profile": {
+        "media_mix": {
+          "image_jpeg": 0.75,
+          "image_png": 0.25
+        },
+        "resolution_distribution": {
+          "720p": 0.5,
+          "1080p": 0.5
+        },
+        "watermark_status_mix": {
+          "watermarked_intact": 0.4,
+          "watermarked_removed": 0.4,
+          "never_watermarked": 0.2
+        }
+      },
+      "access_pattern": {
+        "sync_requests": 1.0,
+        "max_concurrent_clients": 100
+      }
+    }
+  ],
+  "controls": {
+    "model_artifacts": {
+      "detector_image_model": "Pinned version of image watermark removal detector from `experiments/ch6_image_models/artifacts/model_v1.pt`.",
+      "preprocessing_config": "Shared preprocessing parameters (resize, normalization) defined in `configs/preprocessing/default.yaml`.",
+      "score_thresholds": "Shared decision thresholds loaded from `configs/detection_thresholds/baseline_vs_treatment.yaml`."
+    },
+    "hardware": {
+      "host_machine": "Single physical host or reserved VM with identical specifications for baseline and treatment runs.",
+      "cpu": "At least 16 vCPUs.",
+      "memory_gb": 64,
+      "gpu": "1x NVIDIA GPU with >= 8 GB VRAM (e.g., T4 or equivalent); both baseline and treatment `model-svc` use this GPU.",
+      "storage": "500 GB SSD for logs, database, and container images."
+    },
+    "software_stack": {
+      "os": "Linux (e.g., Ubuntu 22.04 LTS).",
+      "container_runtime": "Docker Engine (>= 24.x).",
+      "orchestration": "docker-compose (>= 2.x) for the reference experiment; optional Kubernetes manifests are out-of-scope for core metrics but may be explored by readers.",
+      "python": "Python 3.10.",
+      "dl_framework": "Pinned PyTorch/TensorFlow version consistent with earlier modeling chapters.",
+      "infra_tooling": "Prometheus, Grafana, PostgreSQL, Redis or RabbitMQ, Nginx (optional)."
+    },
+    "dataset": {
+      "source": "Common evaluation dataset constructed in Chapter 4 and used in Chapters 5\u201310.",
+      "split": "Fixed evaluation manifest (list of image paths and labels) stored under `data/manifests/ch11_system_eval.jsonl`.",
+      "assignment": "All workloads draw from the same manifest with randomized but reproducible sampling via fixed seeds.",
+      "random_seed": 1337
+    },
+    "measurement": {
+      "metrics_collection": "All latencies, error codes, and queue metrics are recorded via Prometheus; audit correctness and moderation integration events are captured via PostgreSQL and structured logs.",
+      "time_synchronization": "NTP-synchronized system clock across all containers; experiment scripts capture start and end times in UTC.",
+      "load_generation": "Same load generator tool and configuration templates for baseline and treatment, only target endpoints differ."
+    }
+  },
+  "metrics": [
+    {
+      "name": "p95_end_to_end_latency",
+      "description": "95th percentile latency from client request to final detection decision available to the client.",
+      "unit": "milliseconds"
+    },
+    {
+      "name": "p99_end_to_end_latency",
+      "description": "99th percentile end-to-end latency from client request to detection decision.",
+      "unit": "milliseconds"
+    },
+    {
+      "name": "mean_throughput",
+      "description": "Average successfully processed detection requests per second over the workload duration.",
+      "unit": "requests_per_second"
+    },
+    {
+      "name": "error_rate",
+      "description": "Fraction of requests resulting in 5xx or explicit application-level failure codes.",
+      "unit": "fraction"
+    },
+    {
+      "name": "availability",
+      "description": "Proportion of time during which the detection service meets a specified success criterion (e.g., non-error response within SLA).",
+      "unit": "fraction"
+    },
+    {
+      "name": "queue_depth_peak",
+      "description": "Maximum observed depth of detection job queue during workload.",
+      "unit": "jobs"
+    },
+    {
+      "name": "cpu_utilization_model_service",
+      "description": "Average CPU utilization for the model-serving component over workload.",
+      "unit": "percent"
+    },
+    {
+      "name": "gpu_utilization_model_service",
+      "description": "Average GPU utilization for the model-serving component over workload.",
+      "unit": "percent"
+    },
+    {
+      "name": "moderation_event_delivery_latency_p95",
+      "description": "95th percentile latency from model decision to moderation system receiving a structured event.",
+      "unit": "milliseconds"
+    },
+    {
+      "name": "audit_log_write_success_rate",
+      "description": "Proportion of detection decisions that are successfully persisted to the audit log store within a predefined time window.",
+      "unit": "fraction"
+    },
+    {
+      "name": "sla_breach_rate",
+      "description": "Fraction of requests whose end-to-end latency exceeds the defined SLA threshold (e.g., 500 ms real-time).",
+      "unit": "fraction"
+    },
+    {
+      "name": "fallback_invocation_rate",
+      "description": "Fraction of requests for which a fallback path was used (e.g., cached score, degraded model, or default decision) due to model or infrastructure failures.",
+      "unit": "fraction"
+    },
+    {
+      "name": "deployment_rollback_frequency",
+      "description": "Number of rollbacks triggered during canary/shadow rollout scenarios in the experiment.",
+      "unit": "count"
+    },
+    {
+      "name": "resource_cost_proxy",
+      "description": "Approximate resource usage proxy combining CPU, memory, and GPU-time for all services during workload (e.g., CPU-core-seconds + GPU-memory-seconds).",
+      "unit": "arbitrary_cost_units"
+    },
+    {
+      "name": "observability_coverage_score",
+      "description": "Qualitative or semi-quantitative score reflecting presence of key observability signals (per-request traces, high-cardinality labels, SLO error budget burn rates) mapped into a numeric scale for comparison.",
+      "unit": "dimensionless_score_0_to_1"
+    }
+  ],
+  "success_criteria": {
+    "primary": [
+      {
+        "metric": "p95_end_to_end_latency",
+        "comparison": "treatment <= baseline * 0.9 for wl2-real-time-bursty-high-rps",
+        "interpretation": "Under peak/bursty load, the microservice-based treatment should yield at least 10% lower p95 latency than the monolith, indicating better latency predictability and headroom."
+      },
+      {
+        "metric": "sla_breach_rate",
+        "comparison": "treatment <= baseline * 0.5 for wl2-real-time-bursty-high-rps",
+        "interpretation": "The treatment architecture should cut the rate of SLA breaches by at least half under high-RPS bursts."
+      },
+      {
+        "metric": "availability",
+        "comparison": "treatment >= baseline + 0.02 for wl4-failure-injection",
+        "interpretation": "During injected failures, overall availability (serving non-error responses within SLA) should improve by at least 2 percentage points in the treatment, due to better isolation and fallback."
+      }
+    ],
+    "secondary": [
+      {
+        "metric": "moderation_event_delivery_latency_p95",
+        "comparison": "treatment <= baseline for all workloads",
+        "interpretation": "Moderation integration should not be slower in treatment; equal or better performance is expected."
+      },
+      {
+        "metric": "audit_log_write_success_rate",
+        "comparison": "treatment >= 0.99 for wl2 and wl4",
+        "interpretation": "Audit logging reliability must be at least 99% in treatment even under high load and fault injections."
+      },
+      {
+        "metric": "resource_cost_proxy",
+        "comparison": "treatment <= baseline * 1.25",
+        "interpretation": "Any improvements in latency and availability should not require more than a 25% increase in the approximate resource usage proxy."
+      },
+      {
+        "metric": "observability_coverage_score",
+        "comparison": "treatment >= baseline + 0.3",
+        "interpretation": "The treatment architecture should materially improve observability coverage, reflecting richer metrics, traces, and SLO views."
+      }
+    ],
+    "qualitative": [
+      "Treatment architecture demonstrates clear separation of responsibilities for real-time vs batch detection paths in reference deployment docs.",
+      "Safe rollout strategies (canary, shadow, fallback) are exercised and observable in the failure-injection workload without producing silent data loss in audit logs or moderation events."
+    ]
+  },
+  "failure_modes": [
+    {
+      "name": "measurement_artifacts",
+      "description": "Differences in container placement, noisy neighbors, or host-level contention skew latency and throughput metrics between baseline and treatment.",
+      "mitigations": [
+        "Run each experiment at least 3 times and report distributions, not single-run results.",
+        "Pin containers to dedicated host resources where possible; avoid concurrent unrelated workloads.",
+        "Monitor host-level CPU, memory, and disk I/O during experiments to rule out external interference."
+      ]
+    },
+    {
+      "name": "non_comparable_configurations",
+      "description": "Baseline and treatment use inconsistent model configurations or thresholds, causing differences in compute load and latency unrelated to architecture.",
+      "mitigations": [
+        "Use identical model binaries and configuration files for both deployments.",
+        "Automate deployment configuration from shared YAML/JSON files and verify checksums before runs."
+      ]
+    },
+    {
+      "name": "queue_backpressure_unbounded",
+      "description": "In the treatment, the queue grows unbounded under bursty workloads, causing timeouts and skewed latency metrics.",
+      "mitigations": [
+        "Configure maximum queue depth and rejection/backoff policies.",
+        "Monitor queue depth and include it in the analysis to distinguish queuing delays from processing inefficiencies."
+      ]
+    },
+    {
+      "name": "audit_or_moderation_path_silent_failures",
+      "description": "Decisions are served to clients but not logged or forwarded to moderation due to misconfigured sinks.",
+      "mitigations": [
+        "Include integrity checks comparing counts of served responses vs audit records and moderation events.",
+        "Use transaction-like correlation IDs and consistency checks in analysis scripts."
+      ]
+    },
+    {
+      "name": "improper_fault_injection",
+      "description": "Failure injection in wl4 is too severe or too mild, making architectures appear equally bad or good.",
+      "mitigations": [
+        "Pilot runs to calibrate fault intensity (e.g., partial degradation vs total outage).",
+        "Document injected fault parameters and ensure they are identical between baseline and treatment where applicable."
+      ]
+    },
+    {
+      "name": "overfitting_to_specific_hardware",
+      "description": "Observed benefits rely on specific GPU/CPU ratios or memory layouts that may not generalize.",
+      "mitigations": [
+        "Repeat a subset of experiments on at least two hardware profiles (e.g., different GPU models) when feasible.",
+        "Document resource utilization patterns alongside latency/throughput metrics."
+      ]
+    },
+    {
+      "name": "configuration_drift_between_runs",
+      "description": "Changes in environment variables, dependencies, or container images between baseline and treatment runs invalidate comparability.",
+      "mitigations": [
+        "Use immutable version tags for all containers and configuration bundles.",
+        "Capture a manifest of container image digests and environment settings with each experiment run."
+      ]
+    }
+  ],
+  "required_environment": {
+    "hardware": {
+      "min_cpu_cores": 16,
+      "min_memory_gb": 64,
+      "min_gpu_vram_gb": 8,
+      "storage_gb": 500
+    },
+    "os_and_runtime": {
+      "os": "Ubuntu 22.04 LTS or compatible Linux distribution",
+      "docker_version": ">= 24.0.0",
+      "docker_compose_version": ">= 2.20.0",
+      "python_version": "3.10.x"
+    },
+    "repository_layout": {
+      "root": "https://github.com/bookauthority/ai-watermark-removal-detection",
+      "paths": {
+        "baseline_compose": "deploy/ch11_system_architecture/baseline/compose.yaml",
+        "treatment_compose": "deploy/ch11_system_architecture/treatment/compose.yaml",
+        "k8s_manifests": "deploy/ch11_system_architecture/k8s/",
+        "load_generator": "experiments/ch11_system_architecture/loadgen/",
+        "config_files": "deploy/ch11_system_architecture/configs/",
+        "model_artifacts": "experiments/ch6_image_models/artifacts/",
+        "evaluation_manifest": "data/manifests/ch11_system_eval.jsonl",
+        "metrics_collector": "experiments/ch11_system_architecture/metrics_collector/",
+        "fault_injector": "experiments/ch11_system_architecture/fault_injection/"
+      }
+    },
+    "dependencies": {
+      "python_packages": [
+        "fastapi",
+        "uvicorn",
+        "pydantic",
+        "requests",
+        "httpx",
+        "pillow",
+        "opencv-python",
+        "torch",
+        "prometheus_client",
+        "psycopg2-binary",
+        "redis",
+        "pika",
+        "numpy",
+        "pandas",
+        "pyyaml"
+      ],
+      "services": [
+        "PostgreSQL 14.x",
+        "Redis 7.x or RabbitMQ 3.x",
+        "Prometheus 2.x",
+        "Grafana 9.x"
+      ]
+    },
+    "security_and_governance": {
+      "data_location": "Use synthetic or pre-cleared evaluation datasets; no live user content.",
+      "access_control": "Local experiments do not require external network access beyond pulling container images; restrict DB and queue ports to localhost.",
+      "logging": "Ensure detection logs do not contain sensitive PII beyond synthetic identifiers in the reference setup."
+    }
+  },
+  "run_instructions": {
+    "preparation": [
+      "Clone the repository: `git clone https://github.com/bookauthority/ai-watermark-removal-detection.git`",
+      "Change directory: `cd ai-watermark-removal-detection`",
+      "Create and activate a Python virtual environment (optional but recommended).",
+      "Install Python dependencies: `pip install -r deploy/ch11_system_architecture/requirements.txt`.",
+      "Pull required Docker images: `docker compose -f deploy/ch11_system_architecture/baseline/compose.yaml pull` and similarly for `treatment/compose.yaml`.",
+      "Download or generate the shared evaluation dataset following Chapter 4 instructions; confirm that `data/manifests/ch11_system_eval.jsonl` exists."
+    ],
+    "baseline_run": [
+      "Start the baseline stack: `docker compose -f deploy/ch11_system_architecture/baseline/compose.yaml up -d`.",
+      "Wait for services to become healthy (check with `docker compose ps` or health endpoints).",
+      "Run the load generator for each workload, pointing to the baseline endpoint (e.g., `BASE_URL=http://localhost:8080`):",
+      "  - `python experiments/ch11_system_architecture/loadgen/run_load.py --workload wl1-real-time-low-rps --target-url http://localhost:8080/detect --manifest data/manifests/ch11_system_eval.jsonl --output-dir results/ch11/baseline/wl1/`",
+      "  - Repeat for `wl2-real-time-bursty-high-rps` and `wl3-batch-backfill`.",
+      "For wl4 failure injection, start the fault injector in a separate terminal:",
+      "  - `python experiments/ch11_system_architecture/fault_injection/inject_faults.py --profile baseline_wl4 --docker-compose-file deploy/ch11_system_architecture/baseline/compose.yaml`",
+      "  - Then run: `python experiments/ch11_system_architecture/loadgen/run_load.py --workload wl4-failure-injection --target-url http://localhost:8080/detect --manifest data/manifests/ch11_system_eval.jsonl --output-dir results/ch11/baseline/wl4/`",
+      "After all workloads finish, stop the baseline stack: `docker compose -f deploy/ch11_system_architecture/baseline/compose.yaml down`."
+    ],
+    "treatment_run": [
+      "Start the treatment stack: `docker compose -f deploy/ch11_system_architecture/treatment/compose.yaml up -d`.",
+      "Confirm that gateway, queue, feature, model, aggregator, audit, moderation, DB, and observability services are healthy.",
+      "Note the ingress gateway endpoint (e.g., `http://localhost:9090`).",
+      "Run the load generator for each workload, targeting the treatment ingress endpoint, but using the same manifest and seeds:",
+      "  - `python experiments/ch11_system_architecture/loadgen/run_load.py --workload wl1-real-time-low-rps --target-url http://localhost:9090/detect --manifest data/manifests/ch11_system_eval.jsonl --output-dir results/ch11/treatment/wl1/ --seed 1337`",
+      "  - Repeat for `wl2-real-time-bursty-high-rps` and `wl3-batch-backfill`.",
+      "For wl4, start the treatment-specific fault injector profile:",
+      "  - `python experiments/ch11_system_architecture/fault_injection/inject_faults.py --profile treatment_wl4 --docker-compose-file deploy/ch11_system_architecture/treatment/compose.yaml`",
+      "  - Then run: `python experiments/ch11_system_architecture/loadgen/run_load.py --workload wl4-failure-injection --target-url http://localhost:9090/detect --manifest data/manifests/ch11_system_eval.jsonl --output-dir results/ch11/treatment/wl4/ --seed 1337`",
+      "After workloads complete, stop the treatment stack: `docker compose -f deploy/ch11_system_architecture/treatment/compose.yaml down`."
+    ],
+    "metrics_extraction_and_analysis": [
+      "For each run, export Prometheus metrics to CSV or JSON using the metrics collector:",
+      "  - `python experiments/ch11_system_architecture/metrics_collector/export_metrics.py --prometheus-url http://localhost:9091 --start-time <start> --end-time <end> --output results/ch11/baseline/wl2/metrics.json` (adapt paths and URLs as needed).",
+      "Run the analysis script to compute metrics defined in this spec:",
+      "  - `python experiments/ch11_system_architecture/analyze_results.py --baseline-dir results/ch11/baseline/ --treatment-dir results/ch11/treatment/ --output-dir results/ch11/summary/`",
+      "Review the generated summary report (e.g., `results/ch11/summary/summary.json` and optional plots) to compare baseline vs treatment against success criteria.",
+      "Optional: Use Grafana dashboards defined under `deploy/ch11_system_architecture/observability/grafana_dashboards/` to visually inspect latency distributions, queue depth, and failure behaviors during runs."
+    ],
+    "reproducibility_notes": [
+      "Ensure all commands are run with the same git commit checked out; record the commit hash in the summary report.",
+      "Avoid running other heavy workloads on the same machine during experiments.",
+      "If repeating experiments on different hardware, tag runs appropriately in the analysis script via `--label` flags."
+    ]
+  },
+  "evidence_schema": {
+    "type": "object",
+    "required": [
+      "experiment_meta",
+      "runs",
+      "comparisons",
+      "artifacts"
+    ],
+    "properties": {
+      "experiment_meta": {
+        "type": "object",
+        "required": [
+          "experiment_id",
+          "git_commit",
+          "datetime_utc",
+          "hardware_profile",
+          "software_versions"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string"
+          },
+          "git_commit": {
+            "type": "string",
+            "description": "Git commit hash of the repository used for the experiment."
+          },
+          "datetime_utc": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hardware_profile": {
+            "type": "object",
+            "properties": {
+              "cpu_model": {
+                "type": "string"
+              },
+              "cpu_cores": {
+                "type": "integer"
+              },
+              "memory_gb": {
+                "type": "number"
+              },
+              "gpu_model": {
+                "type": "string"
+              },
+              "gpu_vram_gb": {
+                "type": "number"
+              }
+            }
+          },
+          "software_versions": {
+            "type": "object",
+            "properties": {
+              "os": {
+                "type": "string"
+              },
+              "docker": {
+                "type": "string"
+              },
+              "docker_compose": {
+                "type": "string"
+              },
+              "python": {
+                "type": "string"
+              },
+              "framework": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "runs": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "run_id",
+            "deployment_type",
+            "workload",
+            "start_time_utc",
+            "end_time_utc",
+            "metrics",
+            "fault_profile"
+          ],
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "description": "Unique identifier for this run (e.g., baseline_wl2_run1)."
+            },
+            "deployment_type": {
+              "type": "string",
+              "enum": [
+                "baseline",
+                "treatment"
+              ]
+            },
+            "workload": {
+              "type": "string",
+              "enum": [
+                "wl1-real-time-low-rps",
+                "wl2-real-time-bursty-high-rps",
+                "wl3-batch-backfill",
+                "wl4-failure-injection"
+              ]
+            },
+            "start_time_utc": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end_time_utc": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "metrics": {
+              "type": "object",
+              "properties": {
+                "p95_end_to_end_latency": {
+                  "type": "number"
+                },
+                "p99_end_to_end_latency": {
+                  "type": "number"
+                },
+                "mean_throughput": {
+                  "type": "number"
+                },
+                "error_rate": {
+                  "type": "number"
+                },
+                "availability": {
+                  "type": "number"
+                },
+                "queue_depth_peak": {
+                  "type": "number"
+                },
+                "cpu_utilization_model_service": {
+                  "type": "number"
+                },
+                "gpu_utilization_model_service": {
+                  "type": "number"
+                },
+                "moderation_event_delivery_latency_p95": {
+                  "type": "number"
+                },
+                "audit_log_write_success_rate": {
+                  "type": "number"
+                },
+                "sla_breach_rate": {
+                  "type": "number"
+                },
+                "fallback_invocation_rate": {
+                  "type": "number"
+                },
+                "deployment_rollback_frequency": {
+                  "type": "number"
+                },
+                "resource_cost_proxy": {
+                  "type": "number"
+                },
+                "observability_coverage_score": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            },
+            "fault_profile": {
+              "type": "object",
+              "description": "Faults applied during this run, if any.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "events": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "time_offset_seconds": {
+                        "type": "number"
+                      },
+                      "component": {
+                        "type": "string"
+                      },
+                      "fault_type": {
+                        "type": "string"
+                      },
+                      "parameters": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "comparisons": {
+        "type": "array",
+        "description": "Paired comparisons between baseline and treatment for each workload.",
+        "items": {
+          "type": "object",
+          "required": [
+            "workload",
+            "baseline_runs",
+            "treatment_runs",
+            "aggregated_metrics",
+            "success_criteria_evaluation"
+          ],
+          "properties": {
+            "workload": {
+              "type": "string"
+            },
+            "baseline_runs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "treatment_runs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "aggregated_metrics": {
+              "type": "object",
+              "description": "Summary statistics per deployment type (e.g., mean and std across runs).",
+              "properties": {
+                "baseline": {
+                  "type": "object",
+                  "properties": {
+                    "p95_end_to_end_latency": {
+                      "type": "number"
+                    },
+                    "p99_end_to_end_latency": {
+                      "type": "number"
+                    },
+                    "mean_throughput": {
+                      "type": "number"
+                    },
+                    "error_rate": {
+                      "type": "number"
+                    },
+                    "availability": {
+                      "type": "number"
+                    },
+                    "sla_breach_rate": {
+                      "type": "number"
+                    },
+                    "resource_cost_proxy": {
+                      "type": "number"
+                    }
+                  }
+                },
+                "treatment": {
+                  "type": "object",
+                  "properties": {
+                    "p95_end_to_end_latency": {
+                      "type": "number"
+                    },
+                    "p99_end_to_end_latency": {
+                      "type": "number"
+                    },
+                    "mean_throughput": {
+                      "type": "number"
+                    },
+                    "error_rate": {
+                      "type": "number"
+                    },
+                    "availability": {
+                      "type": "number"
+                    },
+                    "sla_breach_rate": {
+                      "type": "number"
+                    },
+                    "resource_cost_proxy": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "success_criteria_evaluation": {
+              "type": "object",
+              "properties": {
+                "primary_met": {
+                  "type": "boolean"
+                },
+                "secondary_met": {
+                  "type": "boolean"
+                },
+                "details": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "criterion": {
+                        "type": "string"
+                      },
+                      "met": {
+                        "type": "boolean"
+                      },
+                      "baseline_value": {
+                        "type": "number"
+                      },
+                      "treatment_value": {
+                        "type": "number"
+                      },
+                      "comment": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "artifacts": {
+        "type": "object",
+        "properties": {
+          "logs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Relative paths to raw log files for API, model service, queue, audit, and moderation components."
+            }
+          },
+          "dashboards": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Relative paths to exported Grafana dashboard snapshots or images."
+            }
+          },
+          "config_manifests": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Paths to the exact compose files, Kubernetes manifests, and config files used."
+            }
+          },
+          "analysis_reports": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "description": "Paths to generated summary JSON/HTML/PDF reports for the experiment."
+            }
+          }
+        }
+      }
+    },
+    "additionalProperties": false
+  }
+}

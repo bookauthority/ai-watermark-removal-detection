@@ -1,0 +1,478 @@
+{
+  "experiment_id": "ch6-image-detectors-cnns-vit-hybrids-v1",
+  "hypothesis": "For detecting watermark removal in still images, (1) architectures that intake multi-channel forensic feature stacks in addition to RGB (hybrid CNN/ViT) achieve higher robustness to diverse removal attacks than RGB-only CNN baselines at fixed compute, and (2) loss functions tailored to label noise and class imbalance (e.g., focal or class-balanced loss with label smoothing) provide better calibrated recall at low false positive rates than standard cross-entropy.",
+  "baseline": {
+    "description": "A strong but conceptually simple convolutional architecture using only RGB pixels and standard training procedures.",
+    "model_architecture": "ImageNet-pretrained ResNet-50 adapted for binary classification (watermark-removed vs non-removed). Input: 3-channel RGB, resized to 224x224. Final pooling followed by a 2-unit linear layer and sigmoid/softmax.",
+    "input_representation": "Raw 3-channel RGB images (no explicit forensic channels).",
+    "loss_function": "Standard binary cross-entropy with logits (BCEWithLogitsLoss) using class weighting to correct for imbalance based on training label distribution.",
+    "training_regime": {
+      "optimizer": "AdamW with weight decay 1e-4",
+      "learning_rate_schedule": "Cosine decay with warmup (5 epochs warmup, total 50 epochs max)",
+      "batch_size": 64,
+      "data_augmentation": [
+        "RandomResizedCrop(224)",
+        "RandomHorizontalFlip",
+        "ColorJitter (mild)",
+        "Random JPEG compression augmentation within a limited quality range to mimic platform processing"
+      ],
+      "label_noise_handling": "None beyond standard BCE and data cleaning implied by dataset construction.",
+      "class_imbalance_handling": "Static class weights computed from training set label frequencies."
+    },
+    "evaluation_protocol": {
+      "split_strategy": "Single train/validation/test split derived from Chapter 4 dataset, stratified by class and watermark-removal attack type.",
+      "metrics": [
+        "AUC_ROC",
+        "AUC_PR",
+        "Accuracy",
+        "Recall_at_FPR_0_01",
+        "Expected_Cost (using risk weights from Chapter 3, if configured)"
+      ],
+      "stress_tests": [
+        "Held-out attack types not seen during training (e.g., certain inpainting or diffusion-based removal configurations).",
+        "Distribution shift across content domains (e.g., synthetic vs real photographs, photo vs illustration)."
+      ]
+    }
+  },
+  "treatment": {
+    "description": "Hybrid architectures that fuse raw RGB with forensic feature channels, paired with robust loss functions for noisy and imbalanced labels, trained and evaluated under the same experimental controls as the baseline.",
+    "variants": [
+      {
+        "name": "Hybrid-CNN-ForensicStack",
+        "model_architecture": "ResNet-50 backbone modified for 8-channel inputs: 3 RGB + 5 forensic channels (e.g., noise residual, local variance, high-frequency magnitude from DCT, JPEG artifact map, and a simple PRNU-like residual). First convolution layer weights for RGB initialized from ImageNet; forensic channels initialized to small random values. Final layers identical to baseline (global pooling + 2-unit classifier).",
+        "input_representation": "Concatenation of RGB image and precomputed forensic feature maps into an 8-channel tensor of shape [B, 8, 224, 224]. Forensic channels are computed by a fixed, non-trainable preprocessing pipeline shared across baseline/treatments in experiments involving forensic inputs.",
+        "loss_function": "Focal loss with class-balanced weighting (e.g., alpha per class derived from effective number of samples, gamma in [1.5, 2.0]).",
+        "training_regime": {
+          "optimizer": "AdamW with weight decay 1e-4",
+          "learning_rate_schedule": "Cosine decay with 5-epoch warmup",
+          "batch_size": 64,
+          "epochs": 50,
+          "data_augmentation": [
+            "Same as baseline",
+            "Additional light Gaussian noise and subtle blur augmentations within acceptable forensic limits"
+          ],
+          "label_noise_handling": "Focal loss to down-weight ambiguous/easy examples; optional label smoothing with epsilon=0.05.",
+          "class_imbalance_handling": "Class-balanced weighting based on effective number of samples as per Cui et al. (2019)."
+        }
+      },
+      {
+        "name": "ViT-RGB",
+        "model_architecture": "Base-size Vision Transformer (ViT-B/16) pre-trained on ImageNet-21k and fine-tuned for binary classification. Input: 3x224x224 RGB image; CLS token head outputs 2 logits.",
+        "input_representation": "3-channel RGB only.",
+        "loss_function": "Label-smoothed cross-entropy (epsilon=0.1) with per-class weighting for imbalance.",
+        "training_regime": {
+          "optimizer": "AdamW, lr tuned to match compute budget with baseline",
+          "learning_rate_schedule": "Cosine decay with warmup",
+          "batch_size": 64,
+          "epochs": 50,
+          "data_augmentation": [
+            "RandAugment or equivalent strong augmentation policy",
+            "Mixup and/or CutMix with moderate alpha"
+          ],
+          "label_noise_handling": "Label smoothing and mixup/CutMix.",
+          "class_imbalance_handling": "Class weights in loss, same as baseline."
+        }
+      },
+      {
+        "name": "Hybrid-ViT-ForensicTokens",
+        "model_architecture": "ViT-B/16 taking RGB patches plus a small set of globally pooled forensic feature tokens. Forensic features per image (e.g., histograms of noise residuals, global frequency band energies) are projected via an MLP to a fixed number of tokens concatenated to the standard patch tokens. CLS token head outputs 2 logits.",
+        "input_representation": "RGB patches plus K forensic tokens computed from whole-image forensic descriptors.",
+        "loss_function": "Focal loss + label smoothing, with the same hyperparameters as Hybrid-CNN-ForensicStack.",
+        "training_regime": {
+          "optimizer": "AdamW",
+          "learning_rate_schedule": "Cosine decay with warmup",
+          "batch_size": 48,
+          "epochs": 50,
+          "data_augmentation": [
+            "Same as ViT-RGB",
+            "Ensuring augmentations are applied consistently to RGB and forensic-descriptor computations when spatially relevant"
+          ],
+          "label_noise_handling": "Focal loss and label smoothing.",
+          "class_imbalance_handling": "Class-balanced loss with effective number weighting."
+        }
+      }
+    ]
+  },
+  "workloads": [
+    {
+      "name": "WL1-CleanSplit-Standard",
+      "description": "Train and evaluate models on the canonical train/val/test split of the Chapter 4 image dataset, with watermark removal attacks represented in similar proportions across splits.",
+      "input_data": {
+        "source": "Dataset generated in Chapter 4 from the repository under `data/processed/images/`.",
+        "format": "Disk-based image files (e.g., PNG/JPEG) with associated JSON/CSV metadata including: watermark presence, watermark removal applied (boolean), attack type, content type (photo, illustration, synthetic), and any relevant generation parameters.",
+        "label_definition": "Binary label y in {0,1} where y=1 indicates 'watermark removal or tampering applied' and y=0 indicates 'no watermark removal/tampering'. Images without any watermarking in origin pipelines should either be excluded or consistently labeled as 'no removal' depending on dataset design in Chapter 4."
+      },
+      "splits": {
+        "train": "Images under `splits/train_standard.json` (stratified by label and attack type).",
+        "val": "Images under `splits/val_standard.json`.",
+        "test": "Images under `splits/test_standard.json`."
+      },
+      "usage": {
+        "baseline": "Train ResNet-50-RGB on train, tune thresholds on val, report metrics on test.",
+        "treatment": "Train all treatment variants on same train split; tune hyperparameters and thresholds on same val split; evaluate on same test split."
+      }
+    },
+    {
+      "name": "WL2-Stress-HeldOutAttacks",
+      "description": "Evaluate generalization to unseen watermark removal attacks and moderate distribution shift.",
+      "input_data": {
+        "source": "Chapter 4 dataset augmented with additional attack pipelines from Chapter 8, saved under `data/processed/images_attacks_extended/`.",
+        "attack_partition": {
+          "seen_attacks": "Attacks present in training (e.g., basic blurs, crops, JPEG recompression, simple inpainting).",
+          "held_out_attacks": "Attacks excluded from training (e.g., certain diffusion-based edits, advanced inpainting configurations, or combinations of transformations). Attack IDs listed in `configs/ch6/heldout_attacks.yaml`."
+        }
+      },
+      "splits": {
+        "train": "Identical to WL1 train but restricted to seen_attacks.",
+        "val": "WL1 val containing only seen_attacks.",
+        "test_seen": "Subset of WL1 test where attack_type \u2208 seen_attacks.",
+        "test_heldout": "Separate directory or metadata-based subset `splits/test_heldout.json` with attack_type \u2208 held_out_attacks."
+      },
+      "usage": {
+        "baseline": "Train as in WL1 (only on seen_attacks). Evaluate separately on test_seen and test_heldout.",
+        "treatment": "Same training protocol; compare performance on test_seen and test_heldout, emphasizing degradation under held_out_attacks."
+      }
+    },
+    {
+      "name": "WL3-CrossValidation-ContentStratified",
+      "description": "Assess variability and stability of model performance across different content types and random seeds.",
+      "input_data": {
+        "source": "Same as WL1.",
+        "content_strata": [
+          "Real_photographs",
+          "Synthetic_photos",
+          "Illustrations/graphics"
+        ]
+      },
+      "splits": {
+        "method": "K-fold cross-validation with K=5 at the image-level, stratified by label and content type. Fold definitions stored as `splits/cv_folds/fold_*.json`.",
+        "per_fold": {
+          "train": "Folds 0..K-1 except one held-out fold.",
+          "val_test": "Either use a nested val split within held-out fold or treat held-out as test with a small fixed validation carve-out."
+        }
+      },
+      "usage": {
+        "baseline": "Run 5-fold CV with 3 random seeds per fold (total 15 runs).",
+        "treatment": "Run at least Hybrid-CNN-ForensicStack and ViT-RGB across the same folds and seeds; Hybrid-ViT-ForensicTokens may use fewer seeds if compute-constrained. Aggregate metrics across folds using predefined scripts."
+      }
+    }
+  ],
+  "controls": {
+    "data_controls": [
+      "Use identical train/val/test splits between baseline and all treatment variants within each workload.",
+      "Ensure preprocessing and augmentations affecting RGB are applied identically for baseline and any RGB components of treatment models.",
+      "For WL2, strictly enforce no leakage of held_out_attacks into training for any model.",
+      "Ensure that all models see the same number of training steps/epochs (or comparable compute budget) per workload."
+    ],
+    "randomness_and_seeds": [
+      "Set and log global random seeds for Python, NumPy, and PyTorch/TensorFlow at the start of each run.",
+      "Deterministic behavior settings (where feasible): enable deterministic convolution and disable non-deterministic algorithms; document any unavoidable non-determinism (e.g., CuDNN)",
+      "For each configuration, run at least 3 independent seeds to quantify variance; WL3 extends this with additional CV folds."
+    ],
+    "hyperparameter_controls": [
+      "Use a shared hyperparameter search space defined under `configs/ch6/hparam_search.yaml` with consistent search budget per model family.",
+      "For comparison, fix the best hyperparameter configuration found on WL1 for use in WL2/WL3, unless otherwise explicitly tested.",
+      "Normalize training budget (epochs * dataset size or total gradient steps) across baseline and treatments, adjusting batch size as needed for GPU memory."
+    ],
+    "compute_and_runtime_controls": [
+      "Run all main experiments on the same hardware tier (e.g., same GPU type and similar CPU/RAM) to avoid bias due to different compute capabilities.",
+      "Log wall-clock training time, GPU-hours, and peak memory usage for each run to contextualize gains vs cost."
+    ]
+  },
+  "metrics": [
+    {
+      "name": "AUC_ROC",
+      "unit": "dimensionless (0-1)",
+      "definition": "Area under the receiver operating characteristic curve over the binary label 'watermark removal vs none'."
+    },
+    {
+      "name": "AUC_PR",
+      "unit": "dimensionless (0-1)",
+      "definition": "Area under the precision-recall curve, with the positive class defined as 'watermark removed/tampered'."
+    },
+    {
+      "name": "Accuracy",
+      "unit": "dimensionless (0-1)",
+      "definition": "Overall proportion of correctly classified images at a chosen decision threshold."
+    },
+    {
+      "name": "Recall_at_FPR_0_01",
+      "unit": "dimensionless (0-1)",
+      "definition": "True positive rate when decision threshold is set such that the false positive rate is approximately 1% on the validation set, then evaluated on test."
+    },
+    {
+      "name": "Recall_at_FPR_0_001",
+      "unit": "dimensionless (0-1)",
+      "definition": "True positive rate when false positive rate is approximately 0.1%, evaluated analogously to Recall_at_FPR_0_01; important for regulatory risk-sensitive scenarios."
+    },
+    {
+      "name": "Expected_Cost",
+      "unit": "arbitrary risk units",
+      "definition": "Cost-weighted combination of false positives and false negatives using weights defined in a configuration file (e.g., cost_fp, cost_fn) aligning with Chapter 3's risk framework."
+    },
+    {
+      "name": "Brier_Score",
+      "unit": "dimensionless (0-1)",
+      "definition": "Mean squared error between predicted probabilities and true labels, used for calibration assessment."
+    },
+    {
+      "name": "ECE",
+      "unit": "dimensionless (0-1)",
+      "definition": "Expected Calibration Error, computed by binning predicted probabilities and comparing them to empirical accuracies; lower is better."
+    },
+    {
+      "name": "Robustness_Degradation_Heldout",
+      "unit": "percentage points",
+      "definition": "Difference in Recall_at_FPR_0_01 between test_seen and test_heldout in WL2 (seen minus held_out); more negative indicates worse robustness."
+    },
+    {
+      "name": "Inference_Latency",
+      "unit": "milliseconds per image",
+      "definition": "Average wall-clock latency per single-image inference at batch_size=1 on target hardware.",
+      "note": "Reported as mean and 95th percentile."
+    },
+    {
+      "name": "Throughput",
+      "unit": "images per second",
+      "definition": "Average images processed per second at batch_size tuned for throughput (e.g., 64) on target hardware."
+    }
+  ],
+  "success_criteria": {
+    "primary": [
+      "On WL1 test set, Hybrid-CNN-ForensicStack achieves at least +3 percentage points absolute improvement in Recall_at_FPR_0_01 over the baseline ResNet-50-RGB, averaged across seeds, with non-overlapping 95% confidence intervals or a statistically significant improvement under a paired test.",
+      "On WL2 test_heldout, at least one treatment model (preferably Hybrid-CNN-ForensicStack or Hybrid-ViT-ForensicTokens) exhibits smaller Robustness_Degradation_Heldout than the baseline by at least 5 percentage points (less drop in recall at fixed FPR)."
+    ],
+    "secondary": [
+      "Treatment models with specialized loss functions (focal, class-balanced, label smoothing) show improved Brier_Score and/or ECE vs baseline, especially in the high-confidence region relevant for operational thresholds.",
+      "Any improvement in robustness or recall is achieved without more than 2x increase in Inference_Latency compared to baseline on representative deployment hardware, or the trade-off is clearly documented for governance review."
+    ],
+    "interpretability_and_introspection": [
+      "Saliency and attribution analyses (e.g., Grad-CAM for CNNs, attention rollout for ViTs) on a curated subset of errors show that treatments leverage meaningful forensic cues (e.g., noise residuals, artifact patterns) rather than superficial content correlations.",
+      "Error analysis reveals distinct failure modes that can be traced back to architectural/input differences, providing actionable guidance for subsequent chapters."
+    ]
+  },
+  "failure_modes": [
+    "No statistically significant improvement in Recall_at_FPR_0_01 or Recall_at_FPR_0_001 on WL1 between baseline and any treatment, suggesting limited value from forensic channels or specialized losses.",
+    "Treatment models overfit to particular watermark-removal artifacts; they perform well on WL1 but degrade more severely than baseline on WL2 test_heldout (worse Robustness_Degradation_Heldout).",
+    "Calibration deteriorates (higher ECE, worse Brier_Score) despite higher raw accuracy or AUC, resulting in poorly set thresholds and increased operational risk.",
+    "Forensic feature computation and hybrid architectures introduce unacceptable inference latency or throughput degradation for realistic platform constraints, without sufficient accuracy gains.",
+    "Interpretability tools highlight that detections are dominated by irrelevant content features (e.g., text regions, specific creators' styles) rather than signals plausibly tied to watermark removal, increasing fairness and governance concerns.",
+    "Implementation bugs or configuration mismatches (e.g., inconsistent preprocessing between training and testing, data leakage from held_out_attacks into training) invalidate comparability; detected via sanity checks or abnormal performance patterns."
+  ],
+  "required_environment": {
+    "hardware": {
+      "gpu": "At least one NVIDIA GPU with >=16GB VRAM (e.g., V100, A100, RTX 4090) for main experiments; smaller GPUs may require reduced batch sizes and fewer model variants.",
+      "cpu": "8+ vCPUs recommended for data loading and preprocessing.",
+      "ram": "32GB system RAM recommended to cache metadata and intermediate features.",
+      "storage": "At least 500GB disk space for image datasets, intermediate forensic feature caches, and experiment logs/checkpoints."
+    },
+    "software": {
+      "os": "Linux (Ubuntu 20.04 or later) recommended; macOS may work with CPU-only or Apple GPU modifications.",
+      "python": "Python 3.10+",
+      "deep_learning_framework": "PyTorch >= 2.1 (primary) or TensorFlow 2.x as alternative; repository examples assume PyTorch.",
+      "dependencies": [
+        "numpy",
+        "scipy",
+        "pandas",
+        "scikit-learn",
+        "opencv-python",
+        "tqdm",
+        "matplotlib",
+        "seaborn",
+        "albumentations or torchvision.transforms for data augmentation",
+        "PyTorch Lightning or equivalent training loop framework (optional but recommended)",
+        "captum or similar library for interpretability (for saliency/attribution)",
+        "omegaconf or hydra-core for configuration management"
+      ]
+    },
+    "reproducibility": {
+      "environment_spec": "Use `environment.yml` or `requirements.txt` under `envs/ch6/` in the repository to create a conda/virtualenv environment.",
+      "seed_management": "Centralized seed configuration under `configs/ch6/seeds.yaml` to ensure reproducible runs.",
+      "versioning": "Record git commit hash of the repository and versions of critical packages (PyTorch, CUDA, cuDNN) in experiment logs."
+    }
+  },
+  "run_instructions": [
+    "Clone the repository and set up the environment:",
+    "1. `git clone https://github.com/bookauthority/ai-watermark-removal-detection.git`",
+    "2. `cd ai-watermark-removal-detection`",
+    "3. Create environment (example with conda): `conda env create -f envs/ch6/environment.yml`",
+    "4. `conda activate awrd-ch6` (or the name specified in the environment file).",
+    "",
+    "Prepare the datasets for Chapter 6 (if not already built in Chapter 4):",
+    "5. Run dataset preparation script which materializes WL1/WL2/WL3 splits:",
+    "   `python scripts/ch4_build_image_dataset.py --config configs/ch4/build_images.yaml`",
+    "6. Verify that image data and metadata exist at:",
+    "   - `data/processed/images/`",
+    "   - `data/processed/images_attacks_extended/` (for WL2, if applicable)",
+    "   - `splits/train_standard.json`, `splits/val_standard.json`, `splits/test_standard.json`",
+    "   - `splits/test_heldout.json` and `splits/cv_folds/` for WL2 and WL3.",
+    "",
+    "Optionally precompute forensic feature channels to avoid on-the-fly overhead:",
+    "7. `python experiments/ch6_deep_image_models/precompute_forensics.py --config configs/ch6/forensics.yaml`",
+    "   This should create cached tensors under `data/features/forensics/` keyed by image ID.",
+    "",
+    "Run the baseline ResNet-50-RGB experiment on WL1:",
+    "8. `python experiments/ch6_deep_image_models/train.py \\",
+    "       --config configs/ch6/baseline_resnet_rgb.yaml \\",
+    "       dataset.split_config=splits/train_val_test_standard.yaml`",
+    "9. Monitor training via console logs or optional TensorBoard/W&B integration.",
+    "10. After training, run evaluation:",
+    "    `python experiments/ch6_deep_image_models/eval.py \\",
+    "        --checkpoint outputs/ch6/baseline_resnet_rgb/best.ckpt \\",
+    "        --config configs/ch6/baseline_resnet_rgb.yaml \\",
+    "        dataset.split=test_standard`",
+    "    This should emit metric JSON files under `outputs/ch6/baseline_resnet_rgb/metrics/`.",
+    "",
+    "Run treatment models on WL1 with the same split:",
+    "11. Hybrid-CNN-ForensicStack:",
+    "    `python experiments/ch6_deep_image_models/train.py \\",
+    "        --config configs/ch6/hybrid_cnn_forensic.yaml \\",
+    "        dataset.split_config=splits/train_val_test_standard.yaml`",
+    "    Then evaluate as in step 10 with the corresponding checkpoint and config.",
+    "12. ViT-RGB:",
+    "    `python experiments/ch6_deep_image_models/train.py \\",
+    "        --config configs/ch6/vit_rgb.yaml \\",
+    "        dataset.split_config=splits/train_val_test_standard.yaml`",
+    "13. Hybrid-ViT-ForensicTokens (if compute allows):",
+    "    `python experiments/ch6_deep_image_models/train.py \\",
+    "        --config configs/ch6/hybrid_vit_forensic_tokens.yaml \\",
+    "        dataset.split_config=splits/train_val_test_standard.yaml`",
+    "",
+    "Run WL2 (held-out attacks) for robustness evaluation:",
+    "14. Ensure `configs/ch6/heldout_attacks.yaml` correctly defines seen_attacks and held_out_attacks.",
+    "15. Train baseline and treatment models using the WL2-specific config (which restricts training to seen_attacks):",
+    "    `python experiments/ch6_deep_image_models/train.py \\",
+    "        --config configs/ch6/baseline_resnet_rgb_wl2.yaml`",
+    "16. Evaluate on both test_seen and test_heldout:",
+    "    `python experiments/ch6_deep_image_models/eval.py \\",
+    "        --checkpoint outputs/ch6/baseline_resnet_rgb_wl2/best.ckpt \\",
+    "        --config configs/ch6/baseline_resnet_rgb_wl2.yaml \\",
+    "        dataset.split=test_seen`",
+    "    and",
+    "    `... dataset.split=test_heldout`",
+    "17. Repeat evaluation for each treatment model with corresponding WL2 configs.",
+    "",
+    "Run WL3 (content-stratified cross-validation):",
+    "18. Use the provided CV driver script:",
+    "    `python experiments/ch6_deep_image_models/run_cv.py \\",
+    "        --config configs/ch6/baseline_resnet_rgb_cv.yaml`",
+    "    This script should iterate over folds and seeds, saving metrics per run under `outputs/ch6/cv/baseline_resnet_rgb/`.",
+    "19. Repeat for treatment models where feasible:",
+    "    `python experiments/ch6_deep_image_models/run_cv.py \\",
+    "        --config configs/ch6/hybrid_cnn_forensic_cv.yaml`",
+    "",
+    "Run introspection and error analysis for Chapter 6:",
+    "20. Run saliency/attribution analysis on a curated test subset:",
+    "    `python experiments/ch6_deep_image_models/analyze_saliency.py \\",
+    "        --config configs/ch6/analysis_saliency.yaml \\",
+    "        --checkpoint outputs/ch6/hybrid_cnn_forensic/best.ckpt`",
+    "21. Generate error analysis reports (confusion matrices by attack type, content type, etc.):",
+    "    `python experiments/ch6_deep_image_models/error_analysis.py \\",
+    "        --config configs/ch6/error_analysis.yaml`",
+    "",
+    "Aggregate and compare metrics:",
+    "22. Use the aggregation script to compare baseline vs treatments across workloads:",
+    "    `python experiments/ch6_deep_image_models/aggregate_results.py \\",
+    "        --config configs/ch6/aggregate.yaml`",
+    "23. Inspect the resulting summary tables and plots under `outputs/ch6/summary/` to evaluate success_criteria and document findings for governance review."
+  ],
+  "evidence_schema": {
+    "run_metadata": {
+      "run_id": "string (unique identifier per training or evaluation run, e.g., UUID or timestamp)",
+      "experiment_id": "string (e.g., 'ch6-image-detectors-cnns-vit-hybrids-v1')",
+      "model_name": "string (e.g., 'baseline_resnet_rgb', 'hybrid_cnn_forensic', 'vit_rgb', 'hybrid_vit_forensic_tokens')",
+      "workload": "string (e.g., 'WL1-CleanSplit-Standard', 'WL2-Stress-HeldOutAttacks', 'WL3-CrossValidation-ContentStratified')",
+      "fold_index": "integer or null (CV fold index for WL3; null otherwise)",
+      "seed": "integer (random seed used)",
+      "git_commit": "string (short SHA of repository state)",
+      "config_path": "string (path to config file used for this run)",
+      "start_time": "ISO 8601 timestamp",
+      "end_time": "ISO 8601 timestamp",
+      "hardware": {
+        "gpu_type": "string",
+        "num_gpus": "integer",
+        "cpu_type": "string",
+        "ram_gb": "number"
+      }
+    },
+    "training_logs": {
+      "epoch": "integer",
+      "train_loss": "number",
+      "val_loss": "number",
+      "val_AUC_ROC": "number",
+      "val_AUC_PR": "number",
+      "val_Accuracy": "number",
+      "val_Recall_at_FPR_0_01": "number",
+      "learning_rate": "number",
+      "gradient_norm": "number (optional)"
+    },
+    "test_metrics": {
+      "split_name": "string (e.g., 'test_standard', 'test_seen', 'test_heldout', 'cv_fold_0_test')",
+      "AUC_ROC": "number",
+      "AUC_PR": "number",
+      "Accuracy": "number",
+      "Recall_at_FPR_0_01": "number",
+      "Recall_at_FPR_0_001": "number",
+      "Expected_Cost": "number",
+      "Brier_Score": "number",
+      "ECE": "number",
+      "Robustness_Degradation_Heldout": "number or null (only populated for WL2 comparisons)",
+      "Inference_Latency": {
+        "mean_ms": "number",
+        "p95_ms": "number"
+      },
+      "Throughput": "number"
+    },
+    "calibration_and_thresholds": {
+      "calibration_curve": [
+        {
+          "prob_bin_lower": "number",
+          "prob_bin_upper": "number",
+          "empirical_accuracy": "number",
+          "count": "integer"
+        }
+      ],
+      "thresholds": {
+        "threshold_for_FPR_0_01": "number",
+        "threshold_for_FPR_0_001": "number"
+      }
+    },
+    "error_analysis": {
+      "confusion_matrix_overall": {
+        "tp": "integer",
+        "fp": "integer",
+        "tn": "integer",
+        "fn": "integer"
+      },
+      "per_attack_type": [
+        {
+          "attack_type": "string",
+          "tp": "integer",
+          "fp": "integer",
+          "tn": "integer",
+          "fn": "integer"
+        }
+      ],
+      "per_content_type": [
+        {
+          "content_type": "string",
+          "tp": "integer",
+          "fp": "integer",
+          "tn": "integer",
+          "fn": "integer"
+        }
+      ]
+    },
+    "introspection_artifacts": {
+      "saliency_maps": "file paths or URIs to stored saliency/attribution heatmaps for selected examples, organized by model and sample ID.",
+      "attention_visualizations": "file paths or URIs to attention rollout or related ViT interpretability plots.",
+      "notebooks_or_reports": "file paths or URIs to Jupyter notebooks or HTML/PDF reports summarizing introspection findings."
+    },
+    "governance_summary": {
+      "summary_report_path": "string (path to consolidated report for Chapter 6 experiments, including metric tables, robustness analysis, and interpretability highlights)",
+      "known_limitations": [
+        "string (free-text descriptions of limitations discovered in this experiment, to be referenced in later chapters and governance documentation)"
+      ]
+    }
+  }
+}

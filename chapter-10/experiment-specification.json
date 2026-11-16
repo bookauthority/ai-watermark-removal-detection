@@ -1,0 +1,898 @@
+{
+  "experiment_id": "exp-10-multimodal-ensemble-detection-v1",
+  "hypothesis": "Combining heterogeneous detectors (classical forensics, deep learning, and non-visual signals such as metadata) via calibrated score-level and decision-level fusion yields higher robustness to watermark removal attacks\u2014measured by improved ROC-AUC, attack-conditioned recall at fixed false positive rate, and robustness under distribution shift\u2014than any single detector alone, under comparable latency and resource budgets.",
+  "baseline": {
+    "description": "Best-performing single-modality, single-model detectors from earlier chapters, evaluated independently on identical inputs.",
+    "detectors": [
+      {
+        "id": "baseline_img_deep",
+        "type": "image_cnn_or_vit",
+        "source": "chapter_6_best_model",
+        "repository_path": "experiments/ch6_image_detectors/models/best_cnn_or_vit.pt",
+        "input_modalities": [
+          "image_frame"
+        ],
+        "signal_types": [
+          "pixels_only"
+        ],
+        "expected_behavior": "Predicts probability that an image has undergone watermark removal, using raw pixels (optionally with forensic pre-processing) as input."
+      },
+      {
+        "id": "baseline_img_forensics",
+        "type": "classical_forensics_ml",
+        "source": "chapter_5_best_model",
+        "repository_path": "experiments/ch5_baseline_classifier/models/best_forensics_svm.joblib",
+        "input_modalities": [
+          "image_frame"
+        ],
+        "signal_types": [
+          "noise_residual",
+          "dct_features",
+          "wavelet_stats",
+          "jpeg_artifact_metrics"
+        ],
+        "expected_behavior": "Predicts watermark removal probability using handcrafted forensic features and a classical ML classifier (e.g., SVM or gradient-boosted trees)."
+      },
+      {
+        "id": "baseline_video_temporal",
+        "type": "video_temporal_model",
+        "source": "chapter_7_best_model",
+        "repository_path": "experiments/ch7_video_detectors/models/best_temporal_model.pt",
+        "input_modalities": [
+          "video_clip"
+        ],
+        "signal_types": [
+          "frame_sequence",
+          "temporal_consistency_features"
+        ],
+        "expected_behavior": "Predicts watermark removal probability for a video segment based on temporal consistency anomalies across frames."
+      },
+      {
+        "id": "baseline_metadata_behavior",
+        "type": "non_visual_metadata_model",
+        "source": "chapter_4_derived_plus_ch9_monitoring",
+        "repository_path": "experiments/ch10_ensembles/pretrained/metadata_logreg.joblib",
+        "input_modalities": [
+          "metadata"
+        ],
+        "signal_types": [
+          "exif_fields",
+          "generation_provenance_flags",
+          "upload_context",
+          "creator_behavior_aggregates"
+        ],
+        "expected_behavior": "Predicts likelihood of watermark removal using metadata and coarse behavioral/contextual signals (no pixels)."
+      }
+    ],
+    "evaluation_mode": "Each baseline is evaluated separately; no cross-detector fusion. For multimodal inputs (e.g., video + metadata), baselines still use only their native modality."
+  },
+  "treatment": {
+    "description": "Multimodal, ensemble-based detectors that combine outputs from baseline detectors and auxiliary signals via calibrated score fusion, stacking, and tiered decision rules.",
+    "ensembles": [
+      {
+        "id": "treat_early_fusion_img",
+        "type": "image_feature_concat_ensemble",
+        "repository_path": "experiments/ch10_ensembles/early_fusion_image/",
+        "components": [
+          "baseline_img_deep",
+          "baseline_img_forensics"
+        ],
+        "fusion_strategy": "feature_concat_plus_mlp",
+        "details": {
+          "feature_extraction": "Use penultimate-layer embedding from baseline_img_deep concatenated with normalized handcrafted forensic feature vector from baseline_img_forensics.",
+          "meta_model": "2\u20133 layer MLP classifier trained on concatenated features with cross-entropy loss.",
+          "training_protocol": "Train on train split only, with 5-fold CV on validation portion to choose MLP capacity and regularization."
+        }
+      },
+      {
+        "id": "treat_score_fusion_img",
+        "type": "image_score_fusion_ensemble",
+        "repository_path": "experiments/ch10_ensembles/score_fusion_image/",
+        "components": [
+          "baseline_img_deep",
+          "baseline_img_forensics"
+        ],
+        "fusion_strategy": "calibrated_weighted_average",
+        "details": {
+          "calibration": "Apply Platt scaling or isotonic regression per detector on validation data to map scores to calibrated probabilities.",
+          "weight_selection": "Optimize detector weights (w_deep, w_forensics) on validation set to maximize ROC-AUC or detection cost function.",
+          "final_score": "p_ensemble = w_deep * p_deep + w_forensics * p_forensics, with w_deep + w_forensics = 1."
+        }
+      },
+      {
+        "id": "treat_stacking_img_meta",
+        "type": "image_plus_metadata_stacked_ensemble",
+        "repository_path": "experiments/ch10_ensembles/stacking_image_metadata/",
+        "components": [
+          "baseline_img_deep",
+          "baseline_img_forensics",
+          "baseline_metadata_behavior"
+        ],
+        "fusion_strategy": "stacked_generalization",
+        "details": {
+          "level1_features": "Calibrated probabilities and optional uncertainty measures (e.g., entropy) from each component model, plus key risk-sensitive metadata features (e.g., missing expected provenance tag, suspicious edit history).",
+          "meta_model": "Logistic regression or gradient-boosted trees predicting final watermark-removal probability.",
+          "cv_protocol": "Use K-fold cross-validation on training split to produce out-of-fold predictions for meta-model training, avoiding target leakage."
+        }
+      },
+      {
+        "id": "treat_multimodal_video_pipeline",
+        "type": "tiered_detection_pipeline",
+        "repository_path": "experiments/ch10_ensembles/tiered_video_pipeline/",
+        "components": [
+          "baseline_img_deep",
+          "baseline_img_forensics",
+          "baseline_video_temporal",
+          "baseline_metadata_behavior"
+        ],
+        "fusion_strategy": "tiered_decision_rules_plus_score_fusion",
+        "details": {
+          "tier1": "Cheap metadata_behavior and downsampled frame-level deep detector (baseline_img_deep on 1\u20133 keyframes). Route obviously benign or obviously malicious samples to 'safe auto-decision' bucket.",
+          "tier2": "For ambiguous cases, run full video_temporal model on a subset of frames and classical forensic features for those frames.",
+          "decision_aggregation": "Combine per-frame and per-model scores via calibrated weighted fusion; expose uncertainty score. Provide interpretable rationale (which tier, which signal dominated)."
+        }
+      }
+    ]
+  },
+  "workloads": [
+    {
+      "id": "wl_image_in_distribution",
+      "description": "Image-level watermark-removal detection on the main test set drawn from the same distribution as Chapters 4\u20136 (standard watermarks, standard removal attacks).",
+      "input_modalities": [
+        "image_frame",
+        "metadata"
+      ],
+      "dataset_source": "datasets/ch4_watermark_detection/image_splits/test_in_distribution/",
+      "attack_profile": [
+        "jpeg_recompression",
+        "cropping_and_rescaling",
+        "mild_blur_and_noise",
+        "diffusion_resynthesis_standard",
+        "inpainting_based_removal"
+      ],
+      "constraints": {
+        "max_images": 50000,
+        "class_balance": "Approximately balanced between clean, watermarked_not_removed, and watermarked_then_removed.",
+        "label_format": {
+          "field": "label",
+          "values": [
+            "clean_or_watermarked_intact",
+            "watermark_removed"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wl_image_shifted",
+      "description": "Image-level detection under distribution shift: new content domains and unseen or more aggressive removal attacks.",
+      "input_modalities": [
+        "image_frame",
+        "metadata"
+      ],
+      "dataset_source": "datasets/ch9_robustness/image_splits/test_shifted/",
+      "attack_profile": [
+        "strong_compression",
+        "heavy_cropping",
+        "style_transfer_based_obfuscation",
+        "novel_diffusion_models_not_in_train",
+        "watermark_overwriting_with_other_schemes"
+      ],
+      "constraints": {
+        "max_images": 30000,
+        "label_format": {
+          "field": "label",
+          "values": [
+            "clean_or_watermarked_intact",
+            "watermark_removed"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wl_video_multimodal",
+      "description": "Video-level watermark-removal detection with multiple modalities: video frames, temporal features, and metadata/behavioral context.",
+      "input_modalities": [
+        "video_clip",
+        "metadata"
+      ],
+      "dataset_source": "datasets/ch7_video_detection/video_splits/test_multimodal/",
+      "attack_profile": [
+        "frame_substitution",
+        "interpolation_and_frame_rate_change",
+        "segment_wise_diffusion_resynthesis",
+        "codec_transcoding_pipeline",
+        "temporal_watermark_attacks"
+      ],
+      "constraints": {
+        "max_videos": 5000,
+        "max_frames_per_video": 300,
+        "label_format": {
+          "field": "label",
+          "values": [
+            "clean_or_watermarked_intact",
+            "watermark_removed"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wl_operational_tiered_case_study",
+      "description": "Case-study workload simulating a media platform\u2019s tiered pipeline with realistic ingestion patterns and latency budgets.",
+      "input_modalities": [
+        "image_frame",
+        "video_clip",
+        "metadata"
+      ],
+      "dataset_source": "datasets/ch10_ensembles/case_study_stream/",
+      "attack_profile": [
+        "mixture_of_in_distribution_and_shifted_attacks",
+        "benign_postprocessing_only",
+        "legacy_content_without_any_watermark"
+      ],
+      "constraints": {
+        "throughput_target_qps": 50,
+        "p95_latency_budget_ms": 250,
+        "p99_latency_budget_ms": 500,
+        "label_format": {
+          "field": "label",
+          "values": [
+            "clean_or_watermarked_intact",
+            "watermark_removed"
+          ]
+        }
+      }
+    }
+  ],
+  "controls": {
+    "data_splits": {
+      "protocol": "Train/validation/test splits fixed and shared with earlier chapters where applicable.",
+      "random_seed": 42,
+      "leakage_prevention": "No image/video or near-duplicate should appear in both train and test; use perceptual hashing to de-duplicate."
+    },
+    "preprocessing": {
+      "image_normalization": "Resize to common size (e.g., 256x256) with center crop or preserve aspect via padding; normalize channels to ImageNet statistics for deep models.",
+      "video_sampling": "For video workloads, sample frames at a fixed rate (e.g., 4 fps) and limit to max_frames_per_video; ensure identical sampling for all detectors in comparison.",
+      "metadata_sanitization": "Standardize metadata fields (e.g., missing to NULL, categorical encodings) and redact PII in the experimental dataset."
+    },
+    "model_freeze_policy": {
+      "baseline_models": "Weights frozen; no retraining beyond calibration steps.",
+      "treatment_ensembles": "Only ensemble meta-models and fusion weights are trained; underlying detectors remain frozen to isolate ensemble effects."
+    },
+    "evaluation_protocol": {
+      "monte_carlo_runs": 3,
+      "random_seeds": [
+        42,
+        123,
+        777
+      ],
+      "confidence_intervals": "Compute 95% bootstrap CIs for key metrics on test sets.",
+      "stratification": "Report metrics stratified by attack family and content category (e.g., photography vs. illustration)."
+    },
+    "governance_safeguards": {
+      "dual_use_mitigation": "Attack scripts are reused from Chapter 8; no new more powerful removal attacks developed here.",
+      "access_control": "Sensitive behavioral features (if any) simulated or anonymized; clearly documented in dataset cards."
+    }
+  },
+  "metrics": [
+    {
+      "name": "roc_auc",
+      "unit": "unitless (0\u20131)",
+      "description": "Area under the receiver operating characteristic curve for the binary task 'watermark_removed' vs 'clean_or_watermarked_intact'."
+    },
+    {
+      "name": "pr_auc_positive_removed",
+      "unit": "unitless (0\u20131)",
+      "description": "Area under the precision\u2013recall curve where the positive class is 'watermark_removed'."
+    },
+    {
+      "name": "recall_at_fpr_1pct",
+      "unit": "unitless (0\u20131)",
+      "description": "Recall (true positive rate) at a fixed false positive rate of 1% for the 'watermark_removed' class."
+    },
+    {
+      "name": "recall_per_attack_family_at_fpr_1pct",
+      "unit": "unitless (0\u20131) per attack family",
+      "description": "Recall at 1% overall FPR, computed separately for each attack type (e.g., jpeg_recompression, diffusion_resynthesis_standard)."
+    },
+    {
+      "name": "brier_score",
+      "unit": "unitless (0\u20131)",
+      "description": "Mean squared error between predicted probabilities and binary labels, used as a measure of calibration quality."
+    },
+    {
+      "name": "ece_10bin",
+      "unit": "unitless (0\u20131)",
+      "description": "Expected calibration error using 10 equal-width probability bins."
+    },
+    {
+      "name": "throughput_qps",
+      "unit": "queries_per_second",
+      "description": "Effective detection throughput measured under workload wl_operational_tiered_case_study."
+    },
+    {
+      "name": "latency_p95_ms",
+      "unit": "milliseconds",
+      "description": "95th percentile end-to-end detection latency per item (image or video) including all tiers."
+    },
+    {
+      "name": "latency_p99_ms",
+      "unit": "milliseconds",
+      "description": "99th percentile end-to-end detection latency per item (image or video) including all tiers."
+    },
+    {
+      "name": "compute_cost_normalized",
+      "unit": "relative_units",
+      "description": "Approximate per-item compute cost normalized so that the baseline_img_deep cost on wl_image_in_distribution equals 1.0."
+    },
+    {
+      "name": "explainability_proxy_score",
+      "unit": "unitless (0\u20131)",
+      "description": "Heuristic measure reflecting fraction of decisions accompanied by simple, human-readable rationales (e.g., dominant signal and tier), as a proxy for explainability."
+    }
+  ],
+  "success_criteria": {
+    "primary": [
+      {
+        "description": "On image in-distribution workload (wl_image_in_distribution), the best-performing image ensemble (treat_early_fusion_img or treat_score_fusion_img) must outperform the best single image baseline (max over baseline_img_deep and baseline_img_forensics) by at least 0.02 absolute ROC-AUC with non-overlapping 95% bootstrap CIs.",
+        "metric": "roc_auc",
+        "workload": "wl_image_in_distribution",
+        "threshold": "+0.02_vs_best_baseline_with_CI_separation"
+      },
+      {
+        "description": "On shifted image workload (wl_image_shifted), the stacking ensemble with metadata (treat_stacking_img_meta) must improve recall_at_fpr_1pct for watermarked_removed by at least 0.05 absolute compared to baseline_img_deep and baseline_img_forensics, when averaged over seeds.",
+        "metric": "recall_at_fpr_1pct",
+        "workload": "wl_image_shifted",
+        "threshold": "+0.05_vs_each_image_baseline"
+      },
+      {
+        "description": "On video multimodal workload (wl_video_multimodal), the tiered pipeline (treat_multimodal_video_pipeline) must achieve higher recall_per_attack_family_at_fpr_1pct than baseline_video_temporal on at least 70% of attack families, without reducing overall roc_auc.",
+        "metric": "recall_per_attack_family_at_fpr_1pct_and_roc_auc",
+        "workload": "wl_video_multimodal",
+        "threshold": ">=0.0_delta_roc_auc_and_better_recall_in_>=70pct_attack_families"
+      }
+    ],
+    "secondary": [
+      {
+        "description": "On wl_operational_tiered_case_study, the tiered pipeline (treat_multimodal_video_pipeline) must meet latency and throughput targets (p95_latency_ms <= 250, p99_latency_ms <= 500, throughput_qps >= 50) with compute_cost_normalized <= 2.0.",
+        "metrics": [
+          "latency_p95_ms",
+          "latency_p99_ms",
+          "throughput_qps",
+          "compute_cost_normalized"
+        ],
+        "workload": "wl_operational_tiered_case_study",
+        "thresholds": {
+          "latency_p95_ms": "<=250",
+          "latency_p99_ms": "<=500",
+          "throughput_qps": ">=50",
+          "compute_cost_normalized": "<=2.0"
+        }
+      },
+      {
+        "description": "Ensembles that include metadata (treat_stacking_img_meta, treat_multimodal_video_pipeline) must not materially degrade calibration (brier_score and ece_10bin) relative to best baseline; allowable degradation is <= 0.01 absolute.",
+        "metrics": [
+          "brier_score",
+          "ece_10bin"
+        ],
+        "workloads": [
+          "wl_image_in_distribution",
+          "wl_image_shifted",
+          "wl_video_multimodal"
+        ],
+        "thresholds": {
+          "brier_score": "delta<=0.01_vs_best_baseline",
+          "ece_10bin": "delta<=0.01_vs_best_baseline"
+        }
+      },
+      {
+        "description": "Explainability proxy score for the tiered pipeline (treat_multimodal_video_pipeline) must be >= 0.8, indicating that at least 80% of decisions come with simple textual rationales (e.g., 'Tier2: high forensic anomaly in DCT band; metadata missing expected provenance flag').",
+        "metric": "explainability_proxy_score",
+        "workload": "wl_operational_tiered_case_study",
+        "threshold": ">=0.8"
+      }
+    ]
+  },
+  "failure_modes": [
+    {
+      "id": "fm_ensemble_overfitting",
+      "description": "Stacked and early-fusion ensembles overfit validation data, yielding improved metrics on wl_image_in_distribution but no gains or regressions on wl_image_shifted and wl_video_multimodal.",
+      "detection": "Compare in-distribution vs. shifted performance deltas; high variance across seeds or attack families suggests overfitting.",
+      "mitigations": [
+        "Use stricter regularization or simpler meta-models (e.g., logistic regression instead of deep MLP).",
+        "Increase size and diversity of training split for ensembles using cross-domain samples."
+      ]
+    },
+    {
+      "id": "fm_metadata_leakage",
+      "description": "Metadata features encode dataset-specific artifacts (e.g., file naming conventions) that leak label information, artificially inflating ensemble performance.",
+      "detection": "Ablate visual signals and evaluate metadata-only model; unusually high performance or strong split-by-dataset effects indicate leakage.",
+      "mitigations": [
+        "Drop or randomize suspicious metadata fields.",
+        "Rebalance or re-split data so that such artifacts do not correlate with labels."
+      ]
+    },
+    {
+      "id": "fm_latency_blowup",
+      "description": "Tiered pipeline incurs excessive latency for ambiguous cases, violating p95/p99 latency budgets under wl_operational_tiered_case_study.",
+      "detection": "Monitor per-tier latency distributions; identify tiers or models causing most delay.",
+      "mitigations": [
+        "Adjust routing thresholds to reduce the proportion of items reaching the most expensive tier.",
+        "Optimize or prune heavy models; reduce frame sampling density."
+      ]
+    },
+    {
+      "id": "fm_unstable_fusion_weights",
+      "description": "Calibrated score-fusion weights vary greatly across seeds, leading to unstable deployment behavior.",
+      "detection": "Analyze distribution of learned weights over multiple calibration runs; large variance implies instability.",
+      "mitigations": [
+        "Constrain weights with priors (e.g., Dirichlet) or regularization.",
+        "Use fixed, heuristically chosen weights validated across multiple datasets."
+      ]
+    },
+    {
+      "id": "fm_inconsistent_explanations",
+      "description": "Explainability proxy is low or rationales contradict quantitative signals (e.g., rationale cites metadata, but metadata score was low).",
+      "detection": "Sanity-check sample rationales against logged component scores in evidence records.",
+      "mitigations": [
+        "Implement deterministic rule-based rationale generation based on thresholds over component scores.",
+        "Add unit tests to ensure rationale text matches underlying numeric decisions."
+      ]
+    }
+  ],
+  "required_environment": {
+    "hardware": {
+      "cpu": "8+ vCPUs",
+      "gpu": "1x NVIDIA T4 or better (optional but recommended for deep models)",
+      "memory_gb": 32,
+      "storage_gb": 200
+    },
+    "os": [
+      "Ubuntu 20.04+",
+      "Debian 11+",
+      "Equivalent Linux distribution; macOS for small-scale runs"
+    ],
+    "software": {
+      "python": ">=3.10,<3.12",
+      "frameworks": [
+        "PyTorch >=2.0 OR TensorFlow >=2.11 (experiments assume PyTorch by default)",
+        "scikit-learn >=1.2",
+        "NumPy, SciPy, pandas, OpenCV-python, tqdm"
+      ],
+      "orchestration": [
+        "bash shell for CLI scripts",
+        "Optional: Docker >=24.0 for containerized runs"
+      ]
+    },
+    "repository": {
+      "url": "https://github.com/bookauthority/ai-watermark-removal-detection",
+      "relevant_paths": [
+        "experiments/ch4_dataset_pipeline/",
+        "experiments/ch5_baseline_classifier/",
+        "experiments/ch6_image_detectors/",
+        "experiments/ch7_video_detectors/",
+        "experiments/ch8_attacks/",
+        "experiments/ch9_robustness/",
+        "experiments/ch10_ensembles/"
+      ],
+      "environment_setup": [
+        "Clone repository.",
+        "Create virtual environment: python -m venv .venv && source .venv/bin/activate",
+        "Install dependencies: pip install -r requirements.txt OR use provided environment.yml with conda.",
+        "Run basic tests: pytest -q OR provided smoke-test script (e.g., scripts/run_smoke_tests.sh)."
+      ]
+    },
+    "reproducibility": {
+      "seeds": [
+        42,
+        123,
+        777
+      ],
+      "determinism_flags": [
+        "Set PYTHONHASHSEED.",
+        "Configure torch.backends.cudnn.deterministic=True and benchmark=False if using PyTorch.",
+        "Document any non-deterministic operations (e.g., certain CUDA kernels)."
+      ]
+    }
+  },
+  "run_instructions": {
+    "overview": "All scripts are invoked from the repository root. Paths and names below assume the reference implementation in experiments/ch10_ensembles/. Commands are illustrative; consult README.md in each subdirectory for exact options.",
+    "steps": [
+      {
+        "step": 1,
+        "description": "Prepare datasets and ensure baselines are trained and exported.",
+        "commands": [
+          "cd ai-watermark-removal-detection",
+          "# Build or verify image and video datasets (from Chapters 4, 7, 9):",
+          "python experiments/ch4_dataset_pipeline/build_image_datasets.py --config configs/ch4/image_base.yaml",
+          "python experiments/ch7_video_detectors/build_video_datasets.py --config configs/ch7/video_base.yaml",
+          "python experiments/ch9_robustness/build_shifted_datasets.py --config configs/ch9/shifted.yaml",
+          "# Train or download baseline models if not already present:",
+          "python experiments/ch5_baseline_classifier/train_forensics_baseline.py --config configs/ch5/forensics.yaml",
+          "python experiments/ch6_image_detectors/train_image_model.py --config configs/ch6/cnn_best.yaml",
+          "python experiments/ch7_video_detectors/train_video_model.py --config configs/ch7/temporal_best.yaml",
+          "python experiments/ch10_ensembles/train_metadata_model.py --config configs/ch10/metadata_logreg.yaml"
+        ]
+      },
+      {
+        "step": 2,
+        "description": "Calibrate baseline detector scores on validation splits.",
+        "commands": [
+          "# Calibrate per-detector probabilities for score fusion and stacking:",
+          "python experiments/ch10_ensembles/calibrate_detectors.py \\",
+          "  --config configs/ch10/calibration_image.yaml \\",
+          "  --output-dir artifacts/ch10/calibration/image/",
+          "python experiments/ch10_ensembles/calibrate_detectors.py \\",
+          "  --config configs/ch10/calibration_video.yaml \\",
+          "  --output-dir artifacts/ch10/calibration/video/"
+        ]
+      },
+      {
+        "step": 3,
+        "description": "Train ensemble meta-models (early fusion, score fusion, stacking).",
+        "commands": [
+          "# Early fusion (feature concatenation) for images:",
+          "python experiments/ch10_ensembles/train_early_fusion_image.py \\",
+          "  --config configs/ch10/early_fusion_image.yaml \\",
+          "  --seeds 42 123 777",
+          "# Score fusion (calibrated weighted average) for images:",
+          "python experiments/ch10_ensembles/train_score_fusion_image.py \\",
+          "  --config configs/ch10/score_fusion_image.yaml \\",
+          "  --seeds 42 123 777",
+          "# Stacking (image + metadata):",
+          "python experiments/ch10_ensembles/train_stacking_image_metadata.py \\",
+          "  --config configs/ch10/stacking_image_metadata.yaml \\",
+          "  --seeds 42 123 777",
+          "# Tiered multimodal video pipeline:",
+          "python experiments/ch10_ensembles/train_tiered_video_pipeline.py \\",
+          "  --config configs/ch10/tiered_video_pipeline.yaml \\",
+          "  --seeds 42 123 777"
+        ]
+      },
+      {
+        "step": 4,
+        "description": "Evaluate baselines and ensembles on all workloads; export structured evidence.",
+        "commands": [
+          "# Evaluate image in-distribution:",
+          "python experiments/ch10_ensembles/eval_image_workload.py \\",
+          "  --workload-id wl_image_in_distribution \\",
+          "  --include-models baseline_img_deep baseline_img_forensics treat_early_fusion_img treat_score_fusion_img treat_stacking_img_meta \\",
+          "  --output-dir artifacts/ch10/eval/wl_image_in_distribution/",
+          "# Evaluate image under distribution shift:",
+          "python experiments/ch10_ensembles/eval_image_workload.py \\",
+          "  --workload-id wl_image_shifted \\",
+          "  --include-models baseline_img_deep baseline_img_forensics treat_early_fusion_img treat_score_fusion_img treat_stacking_img_meta \\",
+          "  --output-dir artifacts/ch10/eval/wl_image_shifted/",
+          "# Evaluate multimodal video:",
+          "python experiments/ch10_ensembles/eval_video_workload.py \\",
+          "  --workload-id wl_video_multimodal \\",
+          "  --include-models baseline_video_temporal treat_multimodal_video_pipeline \\",
+          "  --output-dir artifacts/ch10/eval/wl_video_multimodal/",
+          "# Evaluate operational tiered case study (including latency and throughput measurements):",
+          "python experiments/ch10_ensembles/eval_operational_tiered_case_study.py \\",
+          "  --workload-id wl_operational_tiered_case_study \\",
+          "  --include-models baseline_img_deep baseline_video_temporal treat_multimodal_video_pipeline \\",
+          "  --output-dir artifacts/ch10/eval/wl_operational_tiered_case_study/"
+        ]
+      },
+      {
+        "step": 5,
+        "description": "Aggregate metrics, compute confidence intervals, and generate governance-ready reports.",
+        "commands": [
+          "# Aggregate and summarize metrics across seeds and workloads:",
+          "python experiments/ch10_ensembles/aggregate_results.py \\",
+          "  --input-root artifacts/ch10/eval/ \\",
+          "  --output-json artifacts/ch10/summary/metrics_summary.json \\",
+          "  --output-report artifacts/ch10/summary/report_ch10_ensembles.md",
+          "# Optional: run notebook for visualizing ROC/PR curves and trade-offs:",
+          "jupyter nbconvert --to notebook --execute notebooks/ch10_ensembles_analysis.ipynb \\",
+          "  --output artifacts/ch10/summary/ch10_ensembles_analysis.executed.ipynb"
+        ]
+      }
+    ],
+    "notes": [
+      "All evaluation scripts should emit logs and results in a structured format conforming to evidence_schema (see below).",
+      "Before running full workloads, use small subsets (e.g., --max-samples 500) to validate configuration and environment.",
+      "For policy and compliance readers, focus on the generated report_ch10_ensembles.md and associated figures, which summarize trade-offs and governance-relevant findings."
+    ]
+  },
+  "evidence_schema": {
+    "description": "Canonical JSON structure for recording per-run, per-model, and per-workload evidence for Chapter 10 experiments. All evaluation scripts must emit data conforming to this schema to support reproducibility, auditing, and downstream reporting.",
+    "type": "object",
+    "required": [
+      "experiment_id",
+      "run_id",
+      "timestamp_utc",
+      "workload_id",
+      "models",
+      "global_config",
+      "metrics_summary",
+      "attack_breakdown",
+      "calibration_stats",
+      "latency_profile",
+      "explainability_stats"
+    ],
+    "properties": {
+      "experiment_id": {
+        "type": "string",
+        "example": "exp-10-multimodal-ensemble-detection-v1"
+      },
+      "run_id": {
+        "type": "string",
+        "description": "Unique identifier for this run, e.g., UUID4 or slug with timestamp and seed.",
+        "example": "run-2026-03-05T14-22-33Z-seed42"
+      },
+      "timestamp_utc": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "workload_id": {
+        "type": "string",
+        "enum": [
+          "wl_image_in_distribution",
+          "wl_image_shifted",
+          "wl_video_multimodal",
+          "wl_operational_tiered_case_study"
+        ]
+      },
+      "seed": {
+        "type": "integer",
+        "example": 42
+      },
+      "global_config": {
+        "type": "object",
+        "description": "Canonicalized snapshot of relevant configuration options for this run.",
+        "properties": {
+          "dataset_path": {
+            "type": "string"
+          },
+          "attack_profile": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "preprocessing": {
+            "type": "object",
+            "properties": {
+              "image_size": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              },
+              "video_fps": {
+                "type": "number"
+              }
+            }
+          },
+          "hardware_summary": {
+            "type": "object",
+            "properties": {
+              "gpu_model": {
+                "type": "string"
+              },
+              "cpu_model": {
+                "type": "string"
+              },
+              "ram_gb": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "models": {
+        "type": "array",
+        "description": "List of models evaluated in this run, including baselines and ensembles.",
+        "items": {
+          "type": "object",
+          "required": [
+            "model_id",
+            "model_type",
+            "is_ensemble",
+            "component_models",
+            "config_hash"
+          ],
+          "properties": {
+            "model_id": {
+              "type": "string",
+              "example": "treat_stacking_img_meta"
+            },
+            "model_type": {
+              "type": "string",
+              "example": "stacked_ensemble"
+            },
+            "is_ensemble": {
+              "type": "boolean"
+            },
+            "component_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "example": [
+                "baseline_img_deep",
+                "baseline_img_forensics",
+                "baseline_metadata_behavior"
+              ]
+            },
+            "config_hash": {
+              "type": "string",
+              "description": "Short hash (e.g., SHA256 truncated) of the model configuration file for traceability."
+            },
+            "checkpoint_path": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "metrics_summary": {
+        "type": "object",
+        "description": "Top-level metrics per model for this run.",
+        "patternProperties": {
+          "^[a-zA-Z0-9_]+$": {
+            "type": "object",
+            "description": "Metrics for a given model_id.",
+            "properties": {
+              "roc_auc": {
+                "type": "number"
+              },
+              "pr_auc_positive_removed": {
+                "type": "number"
+              },
+              "recall_at_fpr_1pct": {
+                "type": "number"
+              },
+              "brier_score": {
+                "type": "number"
+              },
+              "ece_10bin": {
+                "type": "number"
+              },
+              "throughput_qps": {
+                "type": "number"
+              },
+              "latency_p95_ms": {
+                "type": "number"
+              },
+              "latency_p99_ms": {
+                "type": "number"
+              },
+              "compute_cost_normalized": {
+                "type": "number"
+              },
+              "explainability_proxy_score": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "attack_breakdown": {
+        "type": "object",
+        "description": "Per-attack-family metrics to assess robustness.",
+        "patternProperties": {
+          "^[a-zA-Z0-9_]+$": {
+            "type": "object",
+            "description": "Attack family identifier (e.g., jpeg_recompression).",
+            "patternProperties": {
+              "^[a-zA-Z0-9_]+$": {
+                "type": "object",
+                "description": "Per-model metrics under this attack for this run.",
+                "properties": {
+                  "num_samples": {
+                    "type": "integer"
+                  },
+                  "recall_at_fpr_1pct": {
+                    "type": "number"
+                  },
+                  "roc_auc": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "calibration_stats": {
+        "type": "object",
+        "description": "Optional calibration diagnostics per model.",
+        "patternProperties": {
+          "^[a-zA-Z0-9_]+$": {
+            "type": "object",
+            "properties": {
+              "brier_score": {
+                "type": "number"
+              },
+              "ece_10bin": {
+                "type": "number"
+              },
+              "calibration_method": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "latency_profile": {
+        "type": "object",
+        "description": "Latency measurements for operational workloads (empty or partial for offline-only workloads).",
+        "patternProperties": {
+          "^[a-zA-Z0-9_]+$": {
+            "type": "object",
+            "properties": {
+              "latency_p50_ms": {
+                "type": "number"
+              },
+              "latency_p95_ms": {
+                "type": "number"
+              },
+              "latency_p99_ms": {
+                "type": "number"
+              },
+              "throughput_qps": {
+                "type": "number"
+              },
+              "num_items": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "explainability_stats": {
+        "type": "object",
+        "description": "Aggregate explainability and rationale coverage statistics.",
+        "patternProperties": {
+          "^[a-zA-Z0-9_]+$": {
+            "type": "object",
+            "properties": {
+              "explainability_proxy_score": {
+                "type": "number"
+              },
+              "num_items_with_rationale": {
+                "type": "integer"
+              },
+              "num_items_total": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "sample_records": {
+        "type": "array",
+        "description": "Optional subsample of per-item records for auditing; avoid logging full media or PII.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "sample_id": {
+              "type": "string"
+            },
+            "attack_family": {
+              "type": "string"
+            },
+            "true_label": {
+              "type": "string"
+            },
+            "model_scores": {
+              "type": "object",
+              "patternProperties": {
+                "^[a-zA-Z0-9_]+$": {
+                  "type": "number"
+                }
+              }
+            },
+            "final_decision": {
+              "type": "string"
+            },
+            "rationale_text": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

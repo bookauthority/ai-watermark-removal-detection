@@ -1,0 +1,3 @@
+# Intentionally left minimal: use only Python standard library in this sandbox.
+# This ensures the experiment is runnable in constrained environments.
+

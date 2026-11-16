@@ -1,0 +1,594 @@
+{
+  "experiment_id": "exp-ch7-video-temporal-consistency-v1",
+  "hypothesis": "Video-based detectors that exploit temporal consistency across frames (using sequence models and explicit temporal features) achieve significantly higher robustness to watermark removal in AI-generated video than strong frame-wise image detectors, at comparable latency and resource cost per processed second of video.",
+  "baseline": {
+    "description": "Frame-wise watermark-removal detection using an image model extended to video by uniform frame sampling and simple score aggregation.",
+    "model_family": "2D CNN image classifier (reusing the best-performing Chapter 6 image model)",
+    "input_representation": "Single RGB frame resized to 224x224, normalized; no explicit temporal features.",
+    "processing_strategy": "Per-frame inference on K uniformly sampled frames per video, with video-level score = mean(frame_scores).",
+    "aggregation_method": "Simple unweighted averaging of per-frame logits followed by sigmoid/softmax for video-level prediction.",
+    "reference_repo_path": "experiments/ch7_video_temporal/baseline_framewise_cnn",
+    "key_hyperparameters": {
+      "frame_resolution": "224x224",
+      "num_sampled_frames": 16,
+      "batch_size_frames": 64,
+      "optimizer": "Adam",
+      "learning_rate": 0.0003,
+      "weight_decay": 0.0001,
+      "num_epochs": 15,
+      "early_stopping_patience": 3
+    }
+  },
+  "treatment": {
+    "description": "Sequence-based video watermark-removal detection leveraging temporal consistency via 3D CNN / RNN and explicit temporal-difference features, trained end-to-end on short clips sampled from videos.",
+    "variants": [
+      {
+        "name": "3d_cnn_clip_classifier",
+        "model_family": "3D CNN (e.g., ResNet-18 3D backbone or equivalent time-distributed conv net)",
+        "input_representation": "Clips of T=16 consecutive RGB frames at 112x112 or 160x160, stacked as (C,T,H,W); optional extra channel for frame-wise high-pass residuals.",
+        "processing_strategy": "Sliding-window or segment-wise clip extraction covering the full video; per-clip logits aggregated with attention or mean pooling to a video-level score.",
+        "reference_repo_path": "experiments/ch7_video_temporal/treatment_3dcnn_clip",
+        "key_hyperparameters": {
+          "clip_length_frames": 16,
+          "frame_stride": 4,
+          "frame_resolution": "160x160",
+          "batch_size_clips": 16,
+          "optimizer": "AdamW",
+          "learning_rate": 0.0002,
+          "weight_decay": 0.01,
+          "num_epochs": 20,
+          "early_stopping_patience": 5,
+          "label_smoothing": 0.05
+        }
+      },
+      {
+        "name": "2d_cnn_plus_rnn_temporal",
+        "model_family": "2D CNN feature extractor + bidirectional GRU/LSTM sequence model",
+        "input_representation": "Sequence of K sparsely sampled frames at 224x224; per-frame CNN embeddings fed into a 2-layer BiGRU/BiLSTM.",
+        "processing_strategy": "Sample K frames per video using content-aware sampling (midpoints of segments, plus start/end); sequence embedding from RNN pooled to a video-level score.",
+        "reference_repo_path": "experiments/ch7_video_temporal/treatment_cnn_rnn",
+        "key_hyperparameters": {
+          "num_sampled_frames": 24,
+          "frame_resolution": "224x224",
+          "cnn_backbone": "same_as_ch6_best_model_frozen_or_finetuned",
+          "rnn_type": "BiGRU",
+          "rnn_hidden_dim": 512,
+          "rnn_num_layers": 2,
+          "dropout": 0.3,
+          "batch_size_sequences": 8,
+          "optimizer": "Adam",
+          "learning_rate": 0.0001,
+          "weight_decay": 0.0005,
+          "num_epochs": 20,
+          "early_stopping_patience": 5
+        }
+      },
+      {
+        "name": "temporal_consistency_feature_model",
+        "model_family": "Shallow MLP / gradient-boosted tree on hand-crafted temporal consistency features + baseline frame-wise scores.",
+        "input_representation": "Video-level feature vector including statistics of frame-wise image detector scores, optical-flow-based motion inconsistency metrics, inter-frame residual statistics, and codec/bitrate metadata.",
+        "processing_strategy": "Run baseline 2D CNN frame-wise model to obtain per-frame scores; compute temporal feature summary; train classifier on these features.",
+        "reference_repo_path": "experiments/ch7_video_temporal/treatment_temporal_features",
+        "key_hyperparameters": {
+          "frame_sampling": "uniform_32_frames",
+          "flow_algorithm": "TV-L1 or Farneback (OpenCV)",
+          "classifier_type": "XGBoost or LightGBM",
+          "max_depth": 6,
+          "n_estimators": 300,
+          "learning_rate": 0.05,
+          "subsample": 0.8,
+          "colsample_bytree": 0.8
+        }
+      }
+    ]
+  },
+  "workloads": [
+    {
+      "name": "wd_vid_synthetic_short",
+      "description": "Synthetic short-form video dataset generated from Chapter 4 image dataset: each clip is 3\u201310 seconds at 24\u201330 FPS, labeled for watermark presence/removal. Includes clean, watermarked, and attacked variants.",
+      "data_source": "Generated using scripts in `datasets/video/wd_synth_short/` that stitch image frames, apply synthetic camera motion, and embed/remove watermarks or apply removal attacks.",
+      "label_space": {
+        "task_type": "binary_classification",
+        "labels": [
+          "non_removed (0) \u2014 includes clean or intact watermarked content",
+          "removed (1) \u2014 content where a watermark was present in the generative pipeline but is now removed/obfuscated"
+        ]
+      },
+      "splits": {
+        "train": 0.7,
+        "val": 0.15,
+        "test": 0.15,
+        "stratification": "by_label_and_source_video",
+        "notes": "Ensure that base source videos or underlying image sequences do not cross splits; attacks are stratified across splits."
+      },
+      "video_properties": {
+        "duration_seconds_range": [
+          3,
+          10
+        ],
+        "frame_rate": 25,
+        "resolution": "480p or 720p; may be downsampled during preprocessing",
+        "encoding": "H.264 in MP4 container"
+      },
+      "attack_profiles": [
+        "simple_blur_crop_scale",
+        "compression_reencode",
+        "framewise_inpainting",
+        "diffusion_resynthesis_applied_per_frame_or_per_segment"
+      ]
+    },
+    {
+      "name": "wd_vid_synthetic_long",
+      "description": "Long-form videos (30\u2013300 seconds) with sparse watermark presence and partial removal, to stress-test sampling and temporal aggregation strategies.",
+      "data_source": "Generated via `datasets/video/wd_synth_long/` from concatenated scenes and mixed attack strategies, with segment-level annotations.",
+      "label_space": {
+        "task_type": "binary_video_level",
+        "labels": [
+          "contains_removed_segment (1) \u2014 at least one segment contains watermark removal",
+          "no_removed_segment (0) \u2014 no segments with removal"
+        ],
+        "segment_annotations": "Optional segment-level JSON sidecar with per-interval labels to support future localization tasks."
+      },
+      "splits": {
+        "train": 0.6,
+        "val": 0.2,
+        "test": 0.2,
+        "stratification": "by_label, duration_bucket, and attack_family"
+      },
+      "video_properties": {
+        "duration_seconds_range": [
+          30,
+          300
+        ],
+        "frame_rate": 24,
+        "resolution": "720p",
+        "encoding": "H.264 MP4"
+      },
+      "attack_profiles": [
+        "localized_inpainting",
+        "segmentwise_diffusion_edit",
+        "temporal_jitter (frame_drops/insertion)",
+        "mixed_codecs_and_bitrates"
+      ]
+    },
+    {
+      "name": "wd_vid_realistic_eval",
+      "description": "Evaluation-only workload approximating in-the-wild conditions: mixture of real user-like content and synthetic content with/without watermark removal, drawn from distinct sources and kept fully held out from training.",
+      "data_source": "Prepared using `datasets/video/wd_realistic_eval/` scripts that pull from licensed stock footage, synthetic generators, and pre-defined removal scripts with held-out parameters.",
+      "label_space": {
+        "task_type": "binary_classification",
+        "labels": [
+          "removed",
+          "non_removed"
+        ],
+        "metadata": "Additional metadata for scenario-based slicing: content category, motion_level, compression_level, device_profile."
+      },
+      "splits": {
+        "train": 0.0,
+        "val": 0.0,
+        "test": 1.0,
+        "notes": "Strictly evaluation-only; used for Section 7.6 robustness comparison."
+      },
+      "video_properties": {
+        "duration_seconds_range": [
+          5,
+          120
+        ],
+        "frame_rate": "variable (15\u201360)",
+        "resolution": "360p\u20131080p; stored as-uploaded; normalized at preprocessing time",
+        "encoding": "Mixed: H.264, H.265, VP9"
+      },
+      "attack_profiles": [
+        "unknown_parameter_ranges_of_known_attacks",
+        "mild_camera_motion_synthesis",
+        "realistic_post-production (color_grading, overlays, speed_changes)"
+      ]
+    }
+  ],
+  "controls": {
+    "random_seeds": {
+      "global_seed": 17,
+      "framework_seeds": {
+        "numpy": 17,
+        "pytorch_or_tensorflow": 17
+      }
+    },
+    "data_splits": "Use fixed, versioned split indices generated once via `datasets/video/splits/split_v1.json`. All models must use these splits without modification.",
+    "preprocessing": {
+      "color_space": "BGR-to-RGB conversion using OpenCV where applicable; normalize to [0,1] then dataset-specific mean/variance.",
+      "resizing_policy": "Shorter side scaled to target_size (e.g., 224 or 160), then center-crop; document and fix policy per model family.",
+      "frame_extraction": "Use `ffmpeg` commands wrapped in `data/video/utils/frame_extraction.py` to extract frames; specify FPS sampling (`-r`) explicitly and keep identical for all models on the same workload.",
+      "optical_flow": "When computing temporal features, use a fixed algorithm (TV-L1 or Farneback) with pinned parameters stored in a config file under `configs/ch7/flow_tv_l1.yaml`."
+    },
+    "training_protocol": {
+      "early_stopping": "Monitor validation AUROC; stop if no improvement for `early_stopping_patience` epochs; keep the checkpoint with best val AUROC.",
+      "learning_rate_schedule": "Use cosine decay or StepLR as defined in `configs/ch7/*.yaml`; do not tune per model beyond specified grid unless explicitly logged.",
+      "class_imbalance_handling": "Use fixed class weights or focal loss as specified in shared config; maintain identical setting for baseline and sequence-based models on the same task."
+    },
+    "hardware": {
+      "gpu_type": "NVIDIA GPU with >= 16 GB VRAM (e.g., V100/A100/RTX 4090); document exact model and driver.",
+      "cpu": "Document CPU model and core count; aim for >= 8 physical cores.",
+      "memory": ">= 32 GB RAM recommended for long-video experiments."
+    },
+    "reproducibility": {
+      "deterministic_flags": "Enable deterministic/cuDNN settings where possible (noting any performance degradation).",
+      "version_pinning": "Use provided `environment/ch7_video_temporal.yaml` for Conda or `requirements_ch7.txt` for pip; log exact versions via `pip freeze` or `conda env export`.",
+      "logging": "Use a unified logging format (JSONL) via `utils/experiment_logger.py`, including config hash, git commit hash, and data version tags."
+    }
+  },
+  "metrics": [
+    {
+      "name": "video_auroc",
+      "unit": "dimensionless (0\u20131)",
+      "description": "Area under the ROC curve for video-level binary classification on the test set."
+    },
+    {
+      "name": "video_auprc",
+      "unit": "dimensionless (0\u20131)",
+      "description": "Area under the precision\u2013recall curve (with 'removed' as positive class) at video level."
+    },
+    {
+      "name": "video_f1_at_operating_point",
+      "unit": "dimensionless (0\u20131)",
+      "description": "F1 score at a selected operating threshold chosen on the validation set for a target recall or precision (document the criterion)."
+    },
+    {
+      "name": "video_false_positive_rate",
+      "unit": "dimensionless (0\u20131)",
+      "description": "False positive rate at the chosen operating threshold, i.e., fraction of non-removed videos incorrectly flagged as removed."
+    },
+    {
+      "name": "video_false_negative_rate",
+      "unit": "dimensionless (0\u20131)",
+      "description": "False negative rate at the chosen operating threshold, i.e., fraction of removed videos missed by the detector."
+    },
+    {
+      "name": "evasion_rate_under_attacks",
+      "unit": "dimensionless (0\u20131)",
+      "description": "For test videos known to have removal attacks, fraction where the model's predicted label is non-removed at the operating threshold."
+    },
+    {
+      "name": "throughput",
+      "unit": "videos_per_second_and_frames_per_second",
+      "description": "Average number of full videos and raw frames processed per second during batched inference on the test set (measured separately for each model)."
+    },
+    {
+      "name": "latency_per_video",
+      "unit": "milliseconds",
+      "description": "End-to-end inference time per video, including frame extraction, preprocessing, model inference, and aggregation, measured as median and 95th percentile."
+    },
+    {
+      "name": "gpu_memory_peak",
+      "unit": "megabytes",
+      "description": "Peak GPU memory usage during inference on a standardized batch of videos."
+    },
+    {
+      "name": "temporal_inconsistency_score_correlation",
+      "unit": "dimensionless (Pearson_r)",
+      "description": "Correlation between engineered temporal inconsistency scores and model-predicted probabilities of watermark removal; used to sanity-check temporal feature utilization."
+    }
+  ],
+  "success_criteria": {
+    "primary": {
+      "metric": "video_auroc",
+      "workload_scope": [
+        "wd_vid_synthetic_short",
+        "wd_vid_synthetic_long"
+      ],
+      "requirement": "At least one treatment variant (3D CNN, CNN+RNN, or temporal feature model) must achieve >= 0.03 absolute improvement in video_auroc over the baseline frame-wise CNN on both wd_vid_synthetic_short and wd_vid_synthetic_long test sets, with non-overlapping 95% bootstrap confidence intervals where possible."
+    },
+    "secondary": [
+      {
+        "metric": "evasion_rate_under_attacks",
+        "workload_scope": [
+          "wd_vid_synthetic_long",
+          "wd_vid_realistic_eval"
+        ],
+        "requirement": "At equal or lower video_false_positive_rate (within \u00b10.01 absolute), treatment models must reduce evasion_rate_under_attacks by at least 10% relative (e.g., from 0.40 to <= 0.36) compared to the baseline."
+      },
+      {
+        "metric": "throughput",
+        "workload_scope": [
+          "wd_vid_synthetic_short"
+        ],
+        "requirement": "Treatment models must maintain at least 50% of baseline throughput (frames_per_second) on a standardized GPU; if slower, the improvement in video_auroc must be >= 0.05 absolute to be considered practically acceptable."
+      },
+      {
+        "metric": "latency_per_video",
+        "workload_scope": [
+          "wd_vid_realistic_eval"
+        ],
+        "requirement": "Median latency increase for treatment vs baseline must be documented and remain below a 3x slowdown for videos up to 60 seconds when using the recommended configuration."
+      }
+    ],
+    "governance_considerations": "Report per-content-category and per-attack-family breakdowns on wd_vid_realistic_eval to identify any segments where treatment models introduce disproportionately high false positive rates; these slices must be documented even if primary success criteria are met."
+  },
+  "failure_modes": {
+    "technical": [
+      "Overfitting_to_synthetic_temporal_patterns: Temporal models may learn artifacts of the synthetic video generation pipeline (e.g., perfectly smooth camera motion) instead of true watermark-removal traces, leading to poor generalization to wd_vid_realistic_eval.",
+      "temporal_model_instability: RNN or 3D CNN training may become unstable with longer sequences, leading to highly variable performance across runs even with fixed seeds.",
+      "data_loader_bottlenecks: Inefficient frame loading and decoding (e.g., non-sequential disk reads, lack of caching) may dominate runtime, obscuring true model inference cost and making throughput measurements unreliable.",
+      "label_misalignment_in_long_videos: For wd_vid_synthetic_long, coarse video-level labels may not align with sampled segments for training, causing label noise and degraded performance, particularly for models using short clips.",
+      "resource_constraints: 3D CNN models may exceed GPU memory for high-resolution or long clips, forcing downscaling or truncation that changes the comparison with the baseline."
+    ],
+    "threat_model_and_data": [
+      "attack_unseen_temporal_manipulations: Real-world attackers may introduce frame reordering, speed changes, or subtle temporal warping that are not fully covered by synthetic attacks, reducing the benefit of temporal consistency cues.",
+      "codec_and_platform_bias: Models may implicitly key on platform-specific encoding artifacts (e.g., YouTube-style compression) rather than watermark removal per se, limiting portability across platforms.",
+      "distribution_shift_in_content_type: Training mostly on short, visually busy videos (e.g., dynamic scenes) might not transfer to static content (e.g., slideshows), where temporal cues are weak or absent."
+    ],
+    "measurement_and_reproducibility": [
+      "inconsistent_frame_sampling_policies: If baseline and treatment use different frame rates or sampling strategies without being normalized, performance comparisons will be confounded.",
+      "non_deterministic_video_decoding: Differences in ffmpeg versions or decoding backends can change which frames are sampled at boundaries, subtly influencing model inputs and making replication harder.",
+      "operating_point_mismatch: Comparing metrics across models at different thresholds (e.g., unconstrained F1 maxima) without aligning by FPR or recall can misrepresent real-world performance trade-offs."
+    ],
+    "governance_and_dual_use": [
+      "overclaiming_temporal_robustness: If improvements are modest or specific to synthetic attacks, there is a risk of overstating robustness in reports to stakeholders.",
+      "latent_attack_guidance: Detailed publication of failure slices (e.g., attackers can exploit static scenes or specific codecs) must be framed to support defense, not to provide a recipe for attackers; repository documentation should avoid sharing exact configurations that would unduly facilitate watermark removal."
+    ]
+  },
+  "required_environment": {
+    "software": {
+      "os": "Linux (Ubuntu 20.04 or later recommended); macOS possible but not primary test target.",
+      "python_version": "Python 3.10 (as specified in environment file).",
+      "core_dependencies": [
+        "PyTorch >= 2.0 or TensorFlow >= 2.12 (choose one stack; reference configs assume PyTorch).",
+        "torchvision (for 3D CNNs and video I/O utilities when using PyTorch).",
+        "numpy, scipy, scikit-learn",
+        "opencv-python (for video decoding, optical flow, and preprocessing)",
+        "ffmpeg (system package or static binary) for robust video decoding and frame extraction",
+        "pandas (for metric aggregation and reporting)",
+        "matplotlib or seaborn (for plots, optional but recommended)",
+        "pyyaml (for config management)",
+        "xgboost or lightgbm (for temporal feature classifier variant)",
+        "tqdm (for progress bars)"
+      ],
+      "environment_files": [
+        "environment/ch7_video_temporal.yaml",
+        "requirements/requirements_ch7.txt"
+      ],
+      "repo_commit_reference": "Use the tagged release corresponding to the book (e.g., `v1.0-ch7`); record exact git commit hash before running experiments."
+    },
+    "hardware": {
+      "gpu": "1\u20134 NVIDIA GPUs with CUDA support; baseline experiments designed to run on a single 16 GB GPU, with multi-GPU optional via DistributedDataParallel.",
+      "cpu": "At least 8 physical CPU cores; more recommended for parallel video decoding.",
+      "ram": "32 GB recommended, 16 GB minimum if datasets are streamed from disk.",
+      "storage": {
+        "capacity": "At least 500 GB free disk space for raw videos, extracted frames (if cached), and experiment logs.",
+        "iops": "Prefer SSD over HDD for large-scale video workloads to avoid I/O bottlenecks."
+      }
+    },
+    "configurations": {
+      "environment_variables": {
+        "CUDA_VISIBLE_DEVICES": "Set explicitly when running multi-experiment sweeps.",
+        "PYTHONHASHSEED": "17",
+        "OMP_NUM_THREADS": "Set to a moderate value (e.g., 4\u20138) to avoid excessive CPU contention."
+      },
+      "paths": {
+        "dataset_root": "Configurable via `DATASET_ROOT` or CLI flag; default `data/video/`.",
+        "output_root": "Configurable via `OUTPUT_ROOT` or CLI flag; default `outputs/ch7_video_temporal/`."
+      }
+    }
+  },
+  "run_instructions": {
+    "overview": "The experiment consists of (1) building or verifying the video datasets, (2) training the baseline frame-wise model, (3) training each treatment variant, and (4) evaluating and comparing them on the standardized workloads, with all metrics logged in a structured, machine-readable format.",
+    "steps": [
+      {
+        "step": 1,
+        "name": "Clone_repository_and_checkout_tag",
+        "commands": [
+          "git clone https://github.com/bookauthority/ai-watermark-removal-detection.git",
+          "cd ai-watermark-removal-detection",
+          "# Optionally checkout a specific tag for this chapter",
+          "git checkout v1.0-ch7  # or the tag specified in the book"
+        ],
+        "notes": "Record the output of `git rev-parse HEAD` in your experiment log."
+      },
+      {
+        "step": 2,
+        "name": "Create_and_activate_environment",
+        "commands": [
+          "conda env create -f environment/ch7_video_temporal.yaml  # or use pip with requirements_ch7.txt",
+          "conda activate ai-watermark-ch7",
+          "python -m pip install -e .  # if the repo is packaged as an installable module"
+        ],
+        "notes": "Verify Python and library versions match those in the environment file. Confirm ffmpeg is installed via `ffmpeg -version`."
+      },
+      {
+        "step": 3,
+        "name": "Prepare_or_verify_video_datasets",
+        "commands": [
+          "python datasets/video/build_wd_synth_short.py --config configs/ch7/dataset_wd_synth_short.yaml",
+          "python datasets/video/build_wd_synth_long.py --config configs/ch7/dataset_wd_synth_long.yaml",
+          "python datasets/video/build_wd_realistic_eval.py --config configs/ch7/dataset_wd_realistic_eval.yaml"
+        ],
+        "notes": "These scripts should (a) download or generate base content, (b) embed watermarks where needed, (c) apply removal attacks, and (d) write manifest files describing each video, its label(s), and metadata. After generation, run `python datasets/video/validate_manifests.py --config configs/ch7/validate_all.yaml` to ensure integrity and correct splits."
+      },
+      {
+        "step": 4,
+        "name": "Train_baseline_framewise_cnn",
+        "commands": [
+          "python experiments/ch7_video_temporal/train_framewise_baseline.py \\",
+          "  --config configs/ch7/framewise_baseline.yaml \\",
+          "  --dataset_root data/video/ \\",
+          "  --output_root outputs/ch7_video_temporal/framewise_baseline/"
+        ],
+        "notes": "This script should (1) reuse the best Chapter 6 image model weights (or train from scratch if not available), (2) implement uniform frame sampling and per-frame inference, and (3) save both the trained model and per-video predictions on validation and test sets in JSONL or Parquet format."
+      },
+      {
+        "step": 5,
+        "name": "Train_treatment_3d_cnn_clip_model",
+        "commands": [
+          "python experiments/ch7_video_temporal/train_3dcnn_clip.py \\",
+          "  --config configs/ch7/treatment_3dcnn_clip.yaml \\",
+          "  --dataset_root data/video/ \\",
+          "  --output_root outputs/ch7_video_temporal/treatment_3dcnn_clip/"
+        ],
+        "notes": "Ensure the clip extraction parameters (clip_length, stride, resolution) match the config used for evaluation. Monitor GPU utilization and adjust batch size if OOM occurs, but record any deviations from default settings."
+      },
+      {
+        "step": 6,
+        "name": "Train_treatment_cnn_rnn_temporal_model",
+        "commands": [
+          "python experiments/ch7_video_temporal/train_cnn_rnn.py \\",
+          "  --config configs/ch7/treatment_cnn_rnn.yaml \\",
+          "  --dataset_root data/video/ \\",
+          "  --output_root outputs/ch7_video_temporal/treatment_cnn_rnn/"
+        ],
+        "notes": "Confirm that the frame sampling strategy for sequences (number of frames, positions within the video) is logged and remains constant across runs."
+      },
+      {
+        "step": 7,
+        "name": "Train_temporal_consistency_feature_model",
+        "commands": [
+          "python experiments/ch7_video_temporal/compute_temporal_features.py \\",
+          "  --config configs/ch7/temporal_features.yaml \\",
+          "  --dataset_root data/video/ \\",
+          "  --baseline_preds_root outputs/ch7_video_temporal/framewise_baseline/ \\",
+          "  --output_root outputs/ch7_video_temporal/temporal_features/",
+          "python experiments/ch7_video_temporal/train_temporal_feature_classifier.py \\",
+          "  --config configs/ch7/treatment_temporal_features.yaml \\",
+          "  --features_root outputs/ch7_video_temporal/temporal_features/ \\",
+          "  --output_root outputs/ch7_video_temporal/treatment_temporal_features/"
+        ],
+        "notes": "The feature computation script should generate a single feature row per video for each workload split, with a schema matching `evidence_schema.temporal_features`."
+      },
+      {
+        "step": 8,
+        "name": "Run_evaluations_across_all_models_and_workloads",
+        "commands": [
+          "python experiments/ch7_video_temporal/evaluate_models.py \\",
+          "  --config configs/ch7/eval_all.yaml \\",
+          "  --dataset_root data/video/ \\",
+          "  --models_root outputs/ch7_video_temporal/ \\",
+          "  --output_root outputs/ch7_video_temporal/eval/"
+        ],
+        "notes": "The evaluation script should (a) load best checkpoints for each model, (b) run inference on all test workloads (wd_vid_synthetic_short, wd_vid_synthetic_long, wd_vid_realistic_eval), (c) compute all specified metrics with confidence intervals via bootstrapping, and (d) write a consolidated `metrics_summary.json` and per-model detailed prediction files."
+      },
+      {
+        "step": 9,
+        "name": "Generate_benchmark_reports_and_plots",
+        "commands": [
+          "python experiments/ch7_video_temporal/report_benchmarks.py \\",
+          "  --metrics_root outputs/ch7_video_temporal/eval/ \\",
+          "  --output_root outputs/ch7_video_temporal/reports/"
+        ],
+        "notes": "This script should create tables and plots comparing baseline vs treatment models, suitable for inclusion in the book: ROC curves, PR curves, bar charts of AUROC per workload and model, and throughput/latency summaries. It should not fabricate results; it only summarizes the actual experiment logs."
+      }
+    ],
+    "reproducibility_notes": "Each training and evaluation script must accept a `--seed` argument and set all relevant random seeds before data loading and model initialization. Logs should be written to `outputs/ch7_video_temporal/<experiment_name>/logs/` with a run metadata file capturing config, git hash, environment hash, and dataset manifest version hashes."
+  },
+  "evidence_schema": {
+    "prediction_record": {
+      "description": "Schema for a single model prediction on one video instance.",
+      "fields": {
+        "video_id": "string \u2014 unique identifier for the video, matching dataset manifest.",
+        "workload_name": "string \u2014 one of {'wd_vid_synthetic_short', 'wd_vid_synthetic_long', 'wd_vid_realistic_eval'}.",
+        "split": "string \u2014 one of {'train', 'val', 'test'}; primarily 'test' for final reporting.",
+        "model_name": "string \u2014 e.g., 'framewise_baseline_cnn', '3d_cnn_clip_classifier', 'cnn_rnn_temporal', 'temporal_consistency_feature_model'.",
+        "model_version": "string \u2014 hash or tag corresponding to the trained checkpoint.",
+        "ground_truth_label": "int \u2014 0 (non_removed) or 1 (removed).",
+        "predicted_score": "float \u2014 model's predicted probability or score for the 'removed' class in [0,1].",
+        "predicted_label_at_threshold": "int \u2014 0 or 1 at the chosen operating threshold; may be null if threshold not applied.",
+        "threshold_used": "float \u2014 numeric threshold in [0,1] used for binary decision; may be null if not applicable.",
+        "frame_sampling_metadata": {
+          "frame_indices": "array<int> \u2014 positions (0-based) of frames used for this prediction, relative to decoded frames from source video.",
+          "clip_boundaries": "array<array<int>> \u2014 for models using clips, each element is [start_frame, end_frame] of a clip; null for framewise-only models.",
+          "fps_used": "float \u2014 effective frames per second after sampling."
+        },
+        "runtime_metrics": {
+          "preprocessing_time_ms": "float \u2014 time spent decoding and preprocessing video.",
+          "inference_time_ms": "float \u2014 time spent in model inference.",
+          "total_time_ms": "float \u2014 sum of preprocessing and inference times for this video."
+        },
+        "env_metadata": {
+          "git_commit": "string \u2014 current git commit hash.",
+          "experiment_id": "string \u2014 maps back to this specification's experiment_id.",
+          "run_id": "string \u2014 unique identifier for the specific training/evaluation run.",
+          "hardware_summary": "string \u2014 compact description of GPU, CPU, RAM.",
+          "library_versions": "string \u2014 summary snippet or hash of dependency versions."
+        }
+      }
+    },
+    "metrics_summary": {
+      "description": "Schema for aggregated metrics per model, per workload, and per split.",
+      "fields": {
+        "model_name": "string",
+        "model_version": "string",
+        "workload_name": "string",
+        "split": "string \u2014 typically 'test'.",
+        "metrics": {
+          "video_auroc": {
+            "value": "float",
+            "ci_low": "float \u2014 lower bound of 95% bootstrap CI",
+            "ci_high": "float \u2014 upper bound of 95% bootstrap CI"
+          },
+          "video_auprc": {
+            "value": "float",
+            "ci_low": "float",
+            "ci_high": "float"
+          },
+          "video_f1_at_operating_point": {
+            "value": "float",
+            "operating_point_type": "string \u2014 e.g., 'fixed_recall_0.9' or 'fixed_fpr_0.05'",
+            "threshold": "float"
+          },
+          "video_false_positive_rate": {
+            "value": "float",
+            "threshold": "float"
+          },
+          "video_false_negative_rate": {
+            "value": "float",
+            "threshold": "float"
+          },
+          "evasion_rate_under_attacks": {
+            "value": "float",
+            "definition_detail": "string \u2014 precise subset of videos considered attacks and any conditions applied."
+          },
+          "throughput": {
+            "videos_per_second": "float",
+            "frames_per_second": "float",
+            "measurement_notes": "string"
+          },
+          "latency_per_video": {
+            "median_ms": "float",
+            "p95_ms": "float"
+          },
+          "gpu_memory_peak": {
+            "value_mb": "float"
+          },
+          "temporal_inconsistency_score_correlation": {
+            "value": "float",
+            "num_samples": "int"
+          }
+        },
+        "slicing": {
+          "by_attack_family": "object \u2014 keys are attack type identifiers; values are nested metric summaries with same fields as above for each slice.",
+          "by_content_category": "object \u2014 if metadata available, similar nested summaries."
+        }
+      }
+    },
+    "temporal_features": {
+      "description": "Schema for temporal feature vectors used by the temporal_consistency_feature_model.",
+      "fields": {
+        "video_id": "string",
+        "workload_name": "string",
+        "ground_truth_label": "int",
+        "features": {
+          "frame_score_mean": "float \u2014 mean of baseline per-frame 'removed' scores.",
+          "frame_score_std": "float \u2014 standard deviation of baseline per-frame scores.",
+          "frame_score_max": "float",
+          "frame_score_min": "float",
+          "score_temporal_autocorr_lag1": "float \u2014 lag-1 autocorrelation of frame scores.",
+          "flow_magnitude_mean": "float \u2014 mean optical flow magnitude across sampled frame pairs.",
+          "flow_magnitude_std": "float",
+          "flow_direction_entropy": "float \u2014 entropy of quantized flow directions.",
+          "inter_frame_residual_mean": "float \u2014 mean absolute difference between consecutive frames.",
+          "inter_frame_residual_std": "float",
+          "codec_bitrate_kbps": "float \u2014 extracted from container metadata when available.",
+          "duration_seconds": "float",
+          "num_frames_sampled": "int"
+        }
+      }
+    }
+  }
+}

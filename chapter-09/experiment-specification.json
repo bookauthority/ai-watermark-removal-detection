@@ -1,0 +1,729 @@
+{
+  "experiment_id": "exp-ch9-robustness-generalization-distshift-v1",
+  "hypothesis": "Detection models trained on the Chapter 6/7 baselines can be made significantly more robust to realistic distribution shifts and unseen watermark-removal attacks by (a) training with explicit distribution-shift-aware regimes (domain adaptation and attack hold-out), and (b) adding calibrated uncertainty-based abstention, without materially degrading risk-weighted performance on in-distribution data.",
+  "baseline": {
+    "description": "Current best-performing image (Chapter 6) and video (Chapter 7) watermark-removal detectors trained only on the canonical training distribution, evaluated with a single fixed decision threshold tuned on an in-distribution validation split, without explicit domain adaptation, robustness regularization, or abstention.",
+    "models": [
+      {
+        "name": "img_cnn_vanilla",
+        "type": "CNN-based image classifier",
+        "source": "experiments/ch6_image_models/baseline_cnn/",
+        "training_data": "datasets/ch4_watermark_detection/train_v1/ (canonical Lab-Image-Train distribution)",
+        "notes": "Trained on standard training set with cross-entropy loss, no explicit robustness techniques beyond default regularization."
+      },
+      {
+        "name": "vid_3dcnn_vanilla",
+        "type": "3D CNN-based video classifier",
+        "source": "experiments/ch7_video_models/baseline_3dcnn/",
+        "training_data": "datasets/ch4_watermark_detection_video/train_v1/",
+        "notes": "Frame-windowed 3D CNN, uniform sampling, trained with cross-entropy."
+      }
+    ],
+    "evaluation_protocol": {
+      "thresholding": "Single fixed threshold per model chosen to maximize F1 on in-distribution validation set (no risk-weighting).",
+      "domains": [
+        "In-distribution lab validation set (Lab-Image-Val / Lab-Video-Val)",
+        "Out-of-distribution sets not seen during training: Wild-Image-OOD, Wild-Video-OOD, HeldOut-Attack-Families"
+      ],
+      "attacks_included_for_testing": [
+        "Geometric transforms (resize, crop, rotation) seen during training",
+        "JPEG compression levels seen during training",
+        "A subset of diffusion/inpainting-based removal attacks used in Chapter 8"
+      ]
+    }
+  },
+  "treatment": {
+    "description": "Apply domain adaptation / robustness strategies and calibrated uncertainty-based abstention while keeping core architectures unchanged.",
+    "variants": [
+      {
+        "name": "img_cnn_da_erm",
+        "type": "CNN image classifier with domain-adversarial adaptation and attack-family hold-out training",
+        "changes_vs_baseline": [
+          "Introduce domain-adversarial training using gradient reversal on features to align Lab vs. Wild distributions where unlabeled Wild-Image-Train-U data is available.",
+          "Hold out at least one attack family (e.g., diffusion-based resynthesis) entirely from training for robustness evaluation (used only in HeldOut-Attack-Families test set)."
+        ],
+        "source": "experiments/ch9_robustness/image_domain_adaptation/",
+        "training_data": {
+          "labeled_source": "datasets/ch4_watermark_detection/train_v1/",
+          "unlabeled_target": "datasets/ch9_robustness/unlabeled_wild_images_v1/"
+        }
+      },
+      {
+        "name": "img_cnn_da_erm_ua",
+        "type": "img_cnn_da_erm plus uncertainty-aware abstention and calibration",
+        "changes_vs_baseline": [
+          "Use Monte Carlo dropout or deep ensembles to estimate predictive uncertainty.",
+          "Apply temperature scaling on a held-out calibration set (Lab-Image-Cal and Wild-Image-Cal) to improve probability calibration.",
+          "Introduce an abstention region defined by a maximum acceptable predictive entropy or minimum confidence, tuned under a risk-weighted objective."
+        ],
+        "source": "experiments/ch9_robustness/image_uncertainty_calibration/",
+        "training_data": {
+          "labeled_source": "datasets/ch4_watermark_detection/train_v1/",
+          "unlabeled_target": "datasets/ch9_robustness/unlabeled_wild_images_v1/",
+          "calibration": "datasets/ch9_robustness/image_calibration_splits_v1/"
+        }
+      },
+      {
+        "name": "vid_3dcnn_da_erm",
+        "type": "3D CNN video classifier with domain-adversarial adaptation and temporal augmentation",
+        "changes_vs_baseline": [
+          "Domain-adversarial feature alignment for Lab-Video-Train vs. unlabeled Wild-Video-Train-U.",
+          "Hold-out of at least one complex video attack (e.g., segment-wise diffusion editing) for robustness evaluation only.",
+          "Additional temporal jitter and sampling-stride augmentation."
+        ],
+        "source": "experiments/ch9_robustness/video_domain_adaptation/",
+        "training_data": {
+          "labeled_source": "datasets/ch4_watermark_detection_video/train_v1/",
+          "unlabeled_target": "datasets/ch9_robustness/unlabeled_wild_videos_v1/"
+        }
+      },
+      {
+        "name": "vid_3dcnn_da_erm_ua",
+        "type": "vid_3dcnn_da_erm plus uncertainty-aware abstention and calibration",
+        "changes_vs_baseline": [
+          "Use temporal ensembles or MC dropout over time windows for uncertainty estimation.",
+          "Apply temperature scaling and scenario-specific threshold tuning for video.",
+          "Add abstention on high-uncertainty clips, aggregating abstention decisions at the asset level."
+        ],
+        "source": "experiments/ch9_robustness/video_uncertainty_calibration/",
+        "training_data": {
+          "labeled_source": "datasets/ch4_watermark_detection_video/train_v1/",
+          "unlabeled_target": "datasets/ch9_robustness/unlabeled_wild_videos_v1/",
+          "calibration": "datasets/ch9_robustness/video_calibration_splits_v1/"
+        }
+      }
+    ],
+    "comparison_plan": [
+      "Compare img_cnn_vanilla vs img_cnn_da_erm on in-distribution and out-of-distribution performance without abstention.",
+      "Compare img_cnn_da_erm vs img_cnn_da_erm_ua to quantify benefits and costs of abstention and calibration.",
+      "Analogous comparisons for video: vid_3dcnn_vanilla vs vid_3dcnn_da_erm vs vid_3dcnn_da_erm_ua.",
+      "Evaluate all models on HeldOut-Attack-Families and Wild-* OOD sets with identical workloads and metrics."
+    ]
+  },
+  "workloads": [
+    {
+      "name": "W1-in-distribution-lab-image",
+      "description": "Evaluate all image models on the held-out lab validation and test sets that match the training distribution.",
+      "data_source": "datasets/ch4_watermark_detection/{val_v1,test_v1}/images/",
+      "modalities": [
+        "images"
+      ],
+      "labels": [
+        "watermark_present",
+        "watermark_removed",
+        "clean_never_watermarked (optional third class if available)"
+      ],
+      "attack_profile": "Only transformation/attack families already seen during training: standard JPEG compression, modest crops/resizes, light denoising.",
+      "usage": "Baseline reference to quantify robustness cost on in-distribution performance for each treatment variant."
+    },
+    {
+      "name": "W2-in-distribution-lab-video",
+      "description": "Evaluate all video models on the held-out lab validation and test sets matching the training distribution.",
+      "data_source": "datasets/ch4_watermark_detection_video/{val_v1,test_v1}/clips/",
+      "modalities": [
+        "video"
+      ],
+      "labels": [
+        "watermark_present",
+        "watermark_removed",
+        "clean_never_watermarked (if labeled)"
+      ],
+      "attack_profile": "Frame-wise or segment-wise removal operations identical to those used for training (no unseen attacks).",
+      "usage": "Measure any regression in standard lab performance due to domain adaptation or abstention."
+    },
+    {
+      "name": "W3-ood-wild-image-benign-shift",
+      "description": "Test image models on in-the-wild images without explicit new removal attacks but with natural distribution shift (different capture devices, content domains, resolutions).",
+      "data_source": "datasets/ch9_robustness/wild_image_benign_v1/",
+      "modalities": [
+        "images"
+      ],
+      "labels": [
+        "watermark_present",
+        "watermark_removed",
+        "clean_never_watermarked"
+      ],
+      "attack_profile": "No synthetic removal beyond what occurs naturally; focus on covariate shift (content type, noise, compression pipelines).",
+      "usage": "Assess robustness to benign domain shift independent of adversarial removal innovations."
+    },
+    {
+      "name": "W4-ood-wild-video-benign-shift",
+      "description": "Test video models on in-the-wild videos with natural distribution shift (platform-specific transcoding, variable frame rates, user edits).",
+      "data_source": "datasets/ch9_robustness/wild_video_benign_v1/",
+      "modalities": [
+        "video"
+      ],
+      "labels": [
+        "watermark_present",
+        "watermark_removed",
+        "clean_never_watermarked"
+      ],
+      "attack_profile": "Primarily non-adversarial transformations from user workflows and platform pipelines.",
+      "usage": "Evaluate temporal robustness and calibration under realistic platform-type variation."
+    },
+    {
+      "name": "W5-heldout-attack-families-image",
+      "description": "Stress-test image models on synthetic datasets built with attack families that were explicitly held out of training (e.g., novel diffusion/inpainting schemes, extreme recompression, combined geometric+frequency attacks).",
+      "data_source": "datasets/ch9_robustness/heldout_attacks_image_v1/",
+      "modalities": [
+        "images"
+      ],
+      "labels": [
+        "watermark_present",
+        "watermark_removed"
+      ],
+      "attack_profile": "Only attacks belonging to HeldOut-Attack-Families defined in Chapter 8 (e.g., diffusion_resynthesis_v2, adversarial_inpainting_v2) and not used in training or validation.",
+      "usage": "Measure generalization to unseen adversarial strategies and quantify benefits of domain adaptation and abstention."
+    },
+    {
+      "name": "W6-heldout-attack-families-video",
+      "description": "Stress-test video models on held-out adversarial attack families targeting watermark removal in video streams.",
+      "data_source": "datasets/ch9_robustness/heldout_attacks_video_v1/",
+      "modalities": [
+        "video"
+      ],
+      "labels": [
+        "watermark_present",
+        "watermark_removed"
+      ],
+      "attack_profile": "Segment-wise diffusion editing, cross-frame inpainting, and codec-level artifacts not seen during training.",
+      "usage": "Quantify robustness under sophisticated video-specific unseen removal strategies."
+    },
+    {
+      "name": "W7-scenario-based-threshold-eval",
+      "description": "Evaluate all models under multiple operational scenarios with different cost structures and prevalence assumptions using a shared log of scores and uncertainties.",
+      "data_source": "Combined evaluation logs from W1\u2013W6 (scores, uncertainties, metadata).",
+      "modalities": [
+        "tabular metrics",
+        "scenario configs"
+      ],
+      "labels": [
+        "Same as source workloads"
+      ],
+      "attack_profile": "Inherited from contributing source datasets (lab, benign OOD, held-out attacks).",
+      "usage": "Compute scenario-specific thresholds, abstention policies, and calibration diagnostics without retraining models; used for 9.5 (Calibration, threshold selection, and scenario-based tuning)."
+    },
+    {
+      "name": "W8-continuous-eval-simulation",
+      "description": "Simulate a production-like monitoring loop by streaming mixed Lab and Wild content with time-varying distributions, logging metrics for ongoing evaluation.",
+      "data_source": "Synthetic time-sliced streams constructed from Lab-* and Wild-* datasets, stored as event sequences.",
+      "modalities": [
+        "images",
+        "video",
+        "time-series logs"
+      ],
+      "labels": [
+        "Ground-truth class labels where available",
+        "Time-slice and cohort metadata (e.g., platform, region, content category)"
+      ],
+      "attack_profile": "Mix of benign shift and held-out attacks at varying rates over time (e.g., attack prevalence spikes beginning at time slice t>=T0).",
+      "usage": "Exercise monitoring dashboards and drift detection logic; evaluate whether robustness and abstention policies maintain acceptable risk levels as distributions evolve."
+    }
+  ],
+  "controls": {
+    "data_splits": [
+      "Use fixed dataset versions and splits: no changes to train/val/test partitions once defined.",
+      "Ensure that HeldOut-Attack-Families data is never included in any training or calibration set for any model.",
+      "Use identical evaluation subsets for all model variants per workload."
+    ],
+    "randomness": [
+      "Set and log global seeds for Python, NumPy, and framework (PyTorch or TensorFlow) for every run.",
+      "If using GPU, enable deterministic operations where supported and log any operations that are non-deterministic."
+    ],
+    "preprocessing": [
+      "Use identical input preprocessing pipelines (resize, normalization, color space) for all model variants, implemented as shared modules under `src/preprocessing/`.",
+      "Disable any online data augmentation at evaluation; augmentation allowed only at training time, with configurations logged."
+    ],
+    "thresholding_and_calibration": [
+      "For baseline models, choose thresholds solely on in-distribution Lab-*-Val data.",
+      "For treatment models with calibration, use dedicated calibration splits (Lab-* and Wild-* calibration datasets) and apply the same calibration protocol and search grid.",
+      "Do not re-tune thresholds separately per test workload except in W7, where scenario-based tuning is explicitly studied and logged."
+    ],
+    "hardware_and_runtime": [
+      "Run baseline and treatment model evaluations on the same hardware class (e.g., same GPU type or CPU-only setup).",
+      "Limit batch sizes to avoid OOM; keep evaluation batch sizes constant across models for fair latency comparisons."
+    ],
+    "governance_and_logging": [
+      "Log model version, config hash, git commit hash, dataset manifest, and environment hash for each run.",
+      "Ensure no cross-contamination of labeled Wild data into unsupervised target-only splits if the scenario assumes unlabeled target domains."
+    ]
+  },
+  "metrics": [
+    {
+      "name": "accuracy",
+      "unit": "fraction",
+      "description": "Overall fraction of correctly classified samples (or assets) across all classes."
+    },
+    {
+      "name": "precision_watermark_removed",
+      "unit": "fraction",
+      "description": "Positive predictive value when predicting 'watermark_removed'."
+    },
+    {
+      "name": "recall_watermark_removed",
+      "unit": "fraction",
+      "description": "True positive rate for 'watermark_removed' cases."
+    },
+    {
+      "name": "f1_watermark_removed",
+      "unit": "fraction",
+      "description": "Harmonic mean of precision and recall for 'watermark_removed'."
+    },
+    {
+      "name": "false_positive_rate_watermark_removed",
+      "unit": "fraction",
+      "description": "False positive rate when predicting 'watermark_removed' vs. all non-removed cases."
+    },
+    {
+      "name": "false_negative_rate_watermark_removed",
+      "unit": "fraction",
+      "description": "False negative rate on 'watermark_removed' cases."
+    },
+    {
+      "name": "auroc_watermark_removed",
+      "unit": "fraction",
+      "description": "Area under the ROC curve for binary discrimination of 'watermark_removed' vs. others using raw scores."
+    },
+    {
+      "name": "auprc_watermark_removed",
+      "unit": "fraction",
+      "description": "Area under the precision-recall curve for the 'watermark_removed' class."
+    },
+    {
+      "name": "ece",
+      "unit": "fraction",
+      "description": "Expected Calibration Error over probability bins for the predicted class probabilities."
+    },
+    {
+      "name": "max_calibration_error",
+      "unit": "fraction",
+      "description": "Maximum absolute difference between predicted confidence and empirical accuracy across bins."
+    },
+    {
+      "name": "brier_score",
+      "unit": "fraction",
+      "description": "Mean squared error between predicted probability for 'watermark_removed' and actual label (0/1)."
+    },
+    {
+      "name": "abstention_rate",
+      "unit": "fraction",
+      "description": "Fraction of inputs for which the model abstains from making a hard classification."
+    },
+    {
+      "name": "conditional_f1_watermark_removed_nonabstained",
+      "unit": "fraction",
+      "description": "F1 score on 'watermark_removed' restricted to non-abstained samples."
+    },
+    {
+      "name": "risk_weighted_cost",
+      "unit": "dimensionless_cost",
+      "description": "Expected cost per sample using scenario-specific misclassification and abstention costs (e.g., C_FP, C_FN, C_ABSTAIN)."
+    },
+    {
+      "name": "latency_p50",
+      "unit": "milliseconds_per_sample_or_asset",
+      "description": "Median end-to-end model inference latency per sample (image or video clip)."
+    },
+    {
+      "name": "latency_p95",
+      "unit": "milliseconds_per_sample_or_asset",
+      "description": "95th percentile end-to-end inference latency."
+    },
+    {
+      "name": "throughput",
+      "unit": "samples_per_second",
+      "description": "Effective processing rate under the evaluation workload."
+    },
+    {
+      "name": "drift_score_input",
+      "unit": "dimensionless",
+      "description": "Statistical drift score between current input distribution and training distribution (e.g., KL divergence or population stability index on selected features)."
+    },
+    {
+      "name": "drift_score_output",
+      "unit": "dimensionless",
+      "description": "Drift of model output score distribution (e.g., KL divergence between score histograms over time windows)."
+    },
+    {
+      "name": "evasion_rate_heldout_attacks",
+      "unit": "fraction",
+      "description": "Proportion of watermark-removed samples under HeldOut-Attack-Families that are incorrectly classified as non-removed and not abstained."
+    }
+  ],
+  "success_criteria": {
+    "primary": [
+      "On held-out attack workloads (W5 and W6), treatment models with domain adaptation and abstention (img_cnn_da_erm_ua, vid_3dcnn_da_erm_ua) reduce evasion_rate_heldout_attacks by at least 25% relative (i.e., (baseline_evasion - treatment_evasion) / baseline_evasion >= 0.25) while keeping conditional_f1_watermark_removed_nonabstained on in-distribution workloads (W1 and W2) within 2 percentage points absolute of the baseline models.",
+      "For benign OOD workloads (W3 and W4), treatment models achieve lower risk_weighted_cost than baselines under at least two operational scenarios defined in W7 (e.g., 'high-sensitivity compliance review' and 'low-latency user-facing flagging') after scenario-based threshold tuning."
+    ],
+    "secondary": [
+      "Treatment models achieve a reduction in ece of at least 30% relative on W3\u2013W6 without degrading auroc_watermark_removed by more than 2 percentage points absolute.",
+      "Under continuous evaluation simulation (W8), drift_score_input and drift_score_output correlate with degradations in recall_watermark_removed such that an alerting rule based on these drift metrics would have flagged performance drops before a 10 percentage point absolute loss in recall on any time segment.",
+      "Abstention_rate on W5\u2013W6 remains below 40% while still meeting the primary criteria on evasion_rate_heldout_attacks."
+    ],
+    "governance_alignment": [
+      "Robustness reporting templates (see evidence_schema) must expose at least: domain, attack profile, main performance metrics, abstention behavior, and calibration diagnostics, in a form suitable for compliance review.",
+      "All configuration and environment details needed for auditors to reproduce W1\u2013W6 results are captured in the experiment logs and artifacts."
+    ]
+  },
+  "failure_modes": [
+    {
+      "name": "robustness_gain_with_excessive_abstention",
+      "description": "Treatment models achieve lower evasion_rate_heldout_attacks primarily by abstaining on a large majority of OOD or attacked samples, resulting in unacceptably high abstention_rate and degraded operational utility.",
+      "indicators": [
+        "abstention_rate > 0.5 on W5 or W6",
+        "conditional_f1_watermark_removed_nonabstained remains similar to or worse than baselines, despite lower evasion_rate_heldout_attacks"
+      ]
+    },
+    {
+      "name": "in_distribution_performance_collapse",
+      "description": "Domain adaptation or calibration significantly harms performance on lab in-distribution data, undermining reliability under well-understood conditions.",
+      "indicators": [
+        "Drop in f1_watermark_removed on W1 or W2 greater than 3 percentage points absolute vs baseline.",
+        "Significant increase in false_positive_rate_watermark_removed or false_negative_rate_watermark_removed on W1 or W2 beyond governance thresholds defined in Chapter 3 and 12."
+      ]
+    },
+    {
+      "name": "miscalibrated_under_shift",
+      "description": "Treatment models appear well calibrated on lab calibration sets but remain poorly calibrated on Wild and HeldOut-Attack workloads, leading to overconfident wrong decisions.",
+      "indicators": [
+        "ece on W3\u2013W6 remains within 10% of or worse than baseline ece despite calibration.",
+        "max_calibration_error concentrated in high-confidence bins that contain many errors."
+      ]
+    },
+    {
+      "name": "drift_detection_not_predictive",
+      "description": "Drift metrics fail to predict or correlate with drops in key performance metrics under W8 continuous-eval simulation.",
+      "indicators": [
+        "Segmentation of W8 streams into time windows shows large swings (>10 percentage points) in recall_watermark_removed without concurrent significant change in drift_score_input or drift_score_output.",
+        "Alert rules based on drift would either trigger constantly (false alarms) or miss major degradations."
+      ]
+    },
+    {
+      "name": "unfair_robustness_degradation_across_cohorts",
+      "description": "Robustness improvements or degradations are not uniform across cohorts (e.g., content categories, geographies), potentially raising fairness or regulatory issues.",
+      "indicators": [
+        "Subgroup analyses in evidence_schema reveal >10 percentage point gaps in f1_watermark_removed or evasion_rate_heldout_attacks between cohorts before vs. after applying treatments.",
+        "Abstention disproportionately concentrated in certain cohorts."
+      ]
+    },
+    {
+      "name": "non_reproducible_results",
+      "description": "Substantial variance in key metrics under repeated runs with fixed seeds and dataset splits, undermining trust in reported robustness gains.",
+      "indicators": [
+        "Repeated training of the same treatment model under identical configs (n>=3) yields standard deviation of auroc_watermark_removed > 0.02 on the same workload.",
+        "Config or environment drift detected via mismatched hashes or dependency versions in logs."
+      ]
+    }
+  ],
+  "required_environment": {
+    "hardware": {
+      "recommended": [
+        "1\u20132 NVIDIA GPUs with at least 16 GB memory (e.g., V100, T4, A10) for training and evaluation of both image and video models.",
+        "16\u201332 GB system RAM.",
+        "At least 1 TB of available disk storage for datasets and checkpoints (image + video + logs)."
+      ],
+      "minimum": [
+        "Single GPU with 8 GB memory for image-only experiments; video workloads may need to be downscaled or sub-sampled.",
+        "8\u201316 GB system RAM.",
+        "500 GB disk if video datasets are pruned or compressed."
+      ]
+    },
+    "software": {
+      "os": [
+        "Linux (Ubuntu 20.04+), or equivalent POSIX environment. Docker images provided for reproducibility."
+      ],
+      "languages_and_frameworks": [
+        "Python 3.10+",
+        "PyTorch >= 2.0 or TensorFlow >= 2.11 (book repository defaults to one; use that default).",
+        "NumPy, SciPy, scikit-learn, OpenCV, Pandas, Matplotlib/Seaborn or Plotly for plotting."
+      ],
+      "environment_management": [
+        "Conda or venv environment using `environment.yml` or `requirements.txt` from the repository root.",
+        "Optional: Docker with Docker Compose using provided `docker/` configuration."
+      ]
+    },
+    "repository_paths": {
+      "root": "https://github.com/bookauthority/ai-watermark-removal-detection",
+      "datasets": "datasets/",
+      "src_code": "src/",
+      "image_baseline_experiments": "experiments/ch6_image_models/",
+      "video_baseline_experiments": "experiments/ch7_video_models/",
+      "attack_pipelines": "experiments/ch8_attacks/",
+      "robustness_experiments": "experiments/ch9_robustness/",
+      "monitoring_and_reporting": "experiments/ch9_robustness/monitoring_reporting/"
+    }
+  },
+  "run_instructions": {
+    "prerequisites": [
+      "Clone the repository: `git clone https://github.com/bookauthority/ai-watermark-removal-detection.git`.",
+      "Change directory: `cd ai-watermark-removal-detection`.",
+      "Create and activate environment: `conda env create -f environment.yml && conda activate ai-watermark-det` or equivalent using `requirements.txt`.",
+      "Download or generate datasets according to Chapter 4 and 8 instructions; ensure paths under `datasets/` match those referenced in this spec.",
+      "Confirm that baseline models from Chapters 6 and 7 have been trained and checkpoints stored under `experiments/ch6_image_models/checkpoints/` and `experiments/ch7_video_models/checkpoints/` as per their READMEs."
+    ],
+    "steps": [
+      {
+        "step": 1,
+        "title": "Prepare robustness-specific data splits",
+        "commands": [
+          "python experiments/ch9_robustness/scripts/prepare_robustness_splits.py \\",
+          "  --lab-image-root datasets/ch4_watermark_detection/ \\",
+          "  --lab-video-root datasets/ch4_watermark_detection_video/ \\",
+          "  --wild-image-root datasets/raw/wild_images_source/ \\",
+          "  --wild-video-root datasets/raw/wild_videos_source/ \\",
+          "  --attack-config experiments/ch8_attacks/configs/heldout_attacks.yaml \\",
+          "  --output-root datasets/ch9_robustness/"
+        ],
+        "notes": [
+          "This script should construct the unlabeled target sets, calibration splits, Wild-*-Benign sets, and HeldOut-Attack-Families datasets described in the workloads.",
+          "Verify the generated `datasets/ch9_robustness/manifest.json` to ensure dataset statistics make sense (class balance, attack counts)."
+        ]
+      },
+      {
+        "step": 2,
+        "title": "Train domain-adapted image and video models",
+        "commands": [
+          "python experiments/ch9_robustness/image_domain_adaptation/train_da_image.py \\",
+          "  --config experiments/ch9_robustness/configs/img_cnn_da_erm.yaml",
+          "python experiments/ch9_robustness/video_domain_adaptation/train_da_video.py \\",
+          "  --config experiments/ch9_robustness/configs/vid_3dcnn_da_erm.yaml"
+        ],
+        "notes": [
+          "Configs should reference the same base architecture as the baseline models and add domain-adversarial objectives and attack hold-out rules.",
+          "Training logs and checkpoints should be saved under `experiments/ch9_robustness/runs/` with clear run IDs."
+        ]
+      },
+      {
+        "step": 3,
+        "title": "Train or fit calibration and uncertainty components",
+        "commands": [
+          "python experiments/ch9_robustness/image_uncertainty_calibration/fit_calibration_image.py \\",
+          "  --config experiments/ch9_robustness/configs/img_cnn_da_erm_ua_calib.yaml",
+          "python experiments/ch9_robustness/video_uncertainty_calibration/fit_calibration_video.py \\",
+          "  --config experiments/ch9_robustness/configs/vid_3dcnn_da_erm_ua_calib.yaml"
+        ],
+        "notes": [
+          "These scripts should perform temperature scaling and configure uncertainty metrics (e.g., MC dropout passes, ensemble size).",
+          "Resulting calibration parameters must be stored in model-specific subdirectories referenced in evaluation configs."
+        ]
+      },
+      {
+        "step": 4,
+        "title": "Run standardized evaluations across workloads W1\u2013W6",
+        "commands": [
+          "python experiments/ch9_robustness/eval_robustness.py \\",
+          "  --config experiments/ch9_robustness/configs/eval_all_models_image.yaml \\",
+          "  --workloads W1-in-distribution-lab-image W3-ood-wild-image-benign-shift W5-heldout-attack-families-image",
+          "python experiments/ch9_robustness/eval_robustness.py \\",
+          "  --config experiments/ch9_robustness/configs/eval_all_models_video.yaml \\",
+          "  --workloads W2-in-distribution-lab-video W4-ood-wild-video-benign-shift W6-heldout-attack-families-video"
+        ],
+        "notes": [
+          "The evaluation script must load both baseline and treatment checkpoints and compute all metrics defined in this spec.",
+          "Raw predictions, probabilities, and uncertainties should be logged to `experiments/ch9_robustness/logs/{model}/{workload}/predictions.parquet` or equivalent."
+        ]
+      },
+      {
+        "step": 5,
+        "title": "Run scenario-based threshold tuning (W7)",
+        "commands": [
+          "python experiments/ch9_robustness/monitoring_reporting/run_scenarios.py \\",
+          "  --config experiments/ch9_robustness/configs/scenario_eval.yaml \\",
+          "  --input-logs-root experiments/ch9_robustness/logs/ \\",
+          "  --output-root experiments/ch9_robustness/scenario_results/"
+        ],
+        "notes": [
+          "Define scenario configs (e.g., `high_sensitivity.yaml`, `balanced.yaml`, `low_latency.yaml`) specifying class prevalence and cost matrices.",
+          "The script should output scenario-optimized thresholds, abstention policies, and associated risk_weighted_cost for each model and workload."
+        ]
+      },
+      {
+        "step": 6,
+        "title": "Simulate continuous evaluation and monitoring (W8)",
+        "commands": [
+          "python experiments/ch9_robustness/monitoring_reporting/generate_stream.py \\",
+          "  --config experiments/ch9_robustness/configs/stream_config.yaml \\",
+          "  --output-root experiments/ch9_robustness/streams/",
+          "python experiments/ch9_robustness/monitoring_reporting/run_stream_monitoring.py \\",
+          "  --config experiments/ch9_robustness/configs/monitoring_eval.yaml \\",
+          "  --stream-root experiments/ch9_robustness/streams/ \\",
+          "  --output-root experiments/ch9_robustness/monitoring_results/"
+        ],
+        "notes": [
+          "The monitoring script should compute metrics over sliding windows (e.g., hourly or per N samples), compute drift_score_input and drift_score_output, and log alerts according to pre-defined rules.",
+          "Outputs should include time series plots and summary statistics suitable for inclusion in robustness reports."
+        ]
+      },
+      {
+        "step": 7,
+        "title": "Generate robustness experiment reports",
+        "commands": [
+          "python experiments/ch9_robustness/monitoring_reporting/generate_reports.py \\",
+          "  --config experiments/ch9_robustness/configs/reporting.yaml \\",
+          "  --eval-root experiments/ch9_robustness/ \\",
+          "  --output-root experiments/ch9_robustness/reports/"
+        ],
+        "notes": [
+          "Reports should follow the evidence_schema structure below, generating JSON and optionally PDF/HTML summaries.",
+          "At minimum, generate a 'per-domain/per-attack' report and a 'time-series monitoring' report."
+        ]
+      }
+    ],
+    "reproducibility_checks": [
+      "Re-run at least one evaluation workload (e.g., W5-heldout-attack-families-image) for one treatment model with the same config; verify that results match within a narrow tolerance.",
+      "Archive `config.yaml`, git commit hashes, and environment file snapshots alongside each major report."
+    ]
+  },
+  "evidence_schema": {
+    "summary": {
+      "experiment_id": "string",
+      "description": "string",
+      "git_commit": "string",
+      "run_timestamp_utc": "string (ISO 8601)",
+      "models_compared": [
+        {
+          "model_name": "string",
+          "model_type": "string",
+          "baseline_or_treatment": "enum('baseline','treatment')",
+          "checkpoint_path": "string",
+          "config_path": "string"
+        }
+      ]
+    },
+    "workload_results": [
+      {
+        "workload_name": "string (e.g., 'W5-heldout-attack-families-image')",
+        "domain_type": "enum('lab_in_distribution','wild_benign_shift','heldout_attack','mixed_stream')",
+        "modality": "enum('image','video','mixed')",
+        "dataset_manifest_path": "string",
+        "attack_profile": "string (human-readable description or ID linking to Chapter 8 attack configs)",
+        "metrics_by_model": [
+          {
+            "model_name": "string",
+            "baseline_or_treatment": "enum('baseline','treatment')",
+            "metrics": {
+              "accuracy": "float",
+              "precision_watermark_removed": "float",
+              "recall_watermark_removed": "float",
+              "f1_watermark_removed": "float",
+              "false_positive_rate_watermark_removed": "float",
+              "false_negative_rate_watermark_removed": "float",
+              "auroc_watermark_removed": "float",
+              "auprc_watermark_removed": "float",
+              "ece": "float",
+              "max_calibration_error": "float",
+              "brier_score": "float",
+              "abstention_rate": "float",
+              "conditional_f1_watermark_removed_nonabstained": "float",
+              "risk_weighted_cost": "float or null if not evaluated",
+              "latency_p50": "float",
+              "latency_p95": "float",
+              "throughput": "float",
+              "drift_score_input": "float or null",
+              "drift_score_output": "float or null",
+              "evasion_rate_heldout_attacks": "float or null (only for heldout attack workloads)"
+            },
+            "confidence_intervals": {
+              "metric_name": {
+                "lower": "float",
+                "upper": "float",
+                "level": "float (e.g., 0.95)"
+              }
+            },
+            "notes": "string (optional commentary, e.g., observed anomalies or training deviations)"
+          }
+        ]
+      }
+    ],
+    "scenario_analyses": [
+      {
+        "scenario_name": "string (e.g., 'high_sensitivity_compliance')",
+        "description": "string",
+        "cost_matrix": {
+          "C_FP": "float",
+          "C_FN": "float",
+          "C_ABSTAIN": "float"
+        },
+        "prevalence_assumptions": {
+          "p_watermark_removed": "float",
+          "p_other_classes": "mapping from class to float or null"
+        },
+        "thresholds_by_model": [
+          {
+            "model_name": "string",
+            "score_threshold": "float",
+            "abstention_threshold": "float or null",
+            "optimized_metric": "string (e.g., 'risk_weighted_cost')",
+            "metric_values": {
+              "risk_weighted_cost": "float",
+              "precision_watermark_removed": "float",
+              "recall_watermark_removed": "float",
+              "abstention_rate": "float"
+            }
+          }
+        ]
+      }
+    ],
+    "time_series_monitoring": [
+      {
+        "stream_id": "string",
+        "description": "string",
+        "time_window_spec": {
+          "window_size": "integer (e.g., number of samples per window or seconds)",
+          "window_stride": "integer"
+        },
+        "per_window_metrics": [
+          {
+            "window_start_ts_utc": "string",
+            "window_end_ts_utc": "string",
+            "model_name": "string",
+            "metrics": {
+              "accuracy": "float or null",
+              "precision_watermark_removed": "float or null",
+              "recall_watermark_removed": "float or null",
+              "f1_watermark_removed": "float or null",
+              "ece": "float or null",
+              "drift_score_input": "float or null",
+              "drift_score_output": "float or null",
+              "evasion_rate_heldout_attacks": "float or null",
+              "abstention_rate": "float or null"
+            },
+            "alerts_triggered": [
+              {
+                "alert_type": "string (e.g., 'performance_drop','drift_exceeds_threshold')",
+                "severity": "enum('info','warning','critical')",
+                "description": "string"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "cohort_breakdowns": [
+      {
+        "workload_name": "string",
+        "cohort_definition": "string (e.g., 'content_category', 'geography')",
+        "cohorts": [
+          {
+            "cohort_value": "string",
+            "sample_count": "integer",
+            "metrics_by_model": [
+              {
+                "model_name": "string",
+                "f1_watermark_removed": "float",
+                "evasion_rate_heldout_attacks": "float or null",
+                "abstention_rate": "float"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "governance_notes": {
+      "risk_assessment": "string (narrative summary of robustness risks identified, including key failure modes observed).",
+      "operational_recommendations": "string (recommendations for threshold settings, abstention policies, monitoring alerts).",
+      "limitations_and_caveats": "string (known limitations, data gaps, generalization concerns).",
+      "compliance_alignment": "string (mapping of experiment outcomes to relevant regulatory or internal policy requirements)."
+    }
+  }
+}

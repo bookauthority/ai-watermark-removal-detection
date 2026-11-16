@@ -1,0 +1,6 @@
+# Runtime dependencies
+#
+# The experiment is intentionally implemented using **only** the Python
+# standard library to maximize portability and offline reproducibility.
+#
+# Do not add non-standard libraries here.

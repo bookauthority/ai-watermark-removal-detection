@@ -1,0 +1,436 @@
+{
+  "experiment_id": "exp-ch5-baseline-detection-classical-features-v1",
+  "hypothesis": "Handcrafted forensic feature representations (noise, edge, texture, compression, and frequency-domain descriptors) combined with shallow classifiers (logistic regression, SVMs, and tree ensembles) trained on the Chapter 4 dataset can (1) achieve substantially better-than-random detection of watermark removal and (2) reveal systematic failure modes that usefully inform the design of later deep models.",
+  "baseline": {
+    "name": "Pixel-only logistic regression baseline",
+    "description": "A regularized logistic regression classifier trained on aggressively downsampled raw pixel intensities (no handcrafted or frequency-domain features) to detect watermark removal, using the Chapter 4 image dataset and a fixed train/validation/test split.",
+    "configuration": {
+      "features": [
+        "Grayscale downsampled image to 32x32",
+        "Flattened pixel vector normalized to [0, 1]"
+      ],
+      "model": "LogisticRegression(max_iter=1000, penalty='l2', solver='lbfgs', class_weight='balanced')",
+      "data_split": {
+        "train": 0.7,
+        "val": 0.1,
+        "test": 0.2,
+        "stratified_by": "label (watermark-removed vs non-removed)"
+      },
+      "label_definition": {
+        "positive_class": "watermark_removed_or_tampered",
+        "negative_class": "intact_or_never_watermarked"
+      },
+      "random_seed": 42
+    }
+  },
+  "treatment": {
+    "name": "Classical forensic feature baselines",
+    "description": "A family of shallow models (logistic regression, linear SVM, RBF SVM, Random Forest, Gradient Boosted Trees) trained on handcrafted spatial, compression, and frequency-domain feature vectors to detect watermark removal on the same dataset and splits as the pixel-only baseline.",
+    "variants": [
+      {
+        "id": "treatment-logreg-forensic",
+        "features": [
+          "Noise statistics: global and block-wise noise estimates via wavelet-based noise level or high-pass residuals",
+          "Edge statistics: Canny edge density, gradient histograms (e.g., 8-bin orientation histogram), edge connectivity metrics",
+          "Texture descriptors: Gray-Level Co-occurrence Matrix (GLCM) features (contrast, homogeneity, energy, correlation) computed on 4 directions; Local Binary Patterns (LBP) histograms",
+          "Compression artifacts: JPEG quantization artifact metrics (e.g., DCT coefficient histograms per block, blocking artifact measures), estimated JPEG quality factor where applicable",
+          "Frequency-domain features: 2D DCT low/mid/high-frequency band energies; radial power spectrum statistics from FFT magnitude; simple wavelet subband energies"
+        ],
+        "model": "LogisticRegression(max_iter=2000, penalty='l2', solver='lbfgs', class_weight='balanced')"
+      },
+      {
+        "id": "treatment-linear-svm-forensic",
+        "features": "Same as treatment-logreg-forensic",
+        "model": "LinearSVC(class_weight='balanced')"
+      },
+      {
+        "id": "treatment-rbf-svm-forensic",
+        "features": "Same as treatment-logreg-forensic",
+        "model": "SVC(kernel='rbf', class_weight='balanced', probability=True)"
+      },
+      {
+        "id": "treatment-rf-forensic",
+        "features": "Same as treatment-logreg-forensic",
+        "model": "RandomForestClassifier(n_estimators=500, max_depth=None, class_weight='balanced', n_jobs=-1)"
+      },
+      {
+        "id": "treatment-gb-forensic",
+        "features": "Same as treatment-logreg-forensic",
+        "model": "GradientBoostingClassifier()"
+      }
+    ],
+    "shared_configuration": {
+      "feature_normalization": "StandardScaler (zero mean, unit variance) fitted on training set only; applied to train/val/test.",
+      "dimensionality_reduction_optional": "PCA to retain 95% variance as an optional ablation; if used, PCA is fit on training set only.",
+      "data_split": "Identical stratified split as baseline using precomputed indices from Chapter 4 dataset pipeline.",
+      "random_seed": 42
+    }
+  },
+  "workloads": [
+    {
+      "id": "wl-static-image-detection",
+      "description": "Supervised binary classification of watermark removal on still images from the Chapter 4 dataset, using a standardized set of watermarking schemes and removal attacks.",
+      "input_source": "Repository dataset generated in Chapter 4, e.g., `data/ch4_dataset/images/` with manifest `data/ch4_dataset/metadata.csv`.",
+      "input_constraints": {
+        "media_type": "RGB or grayscale images",
+        "resolution": "Original resolutions; feature pipeline will internally resize where required (e.g., to 256x256) using deterministic interpolation.",
+        "supported_formats": [
+          "JPEG",
+          "PNG"
+        ],
+        "label_columns": {
+          "primary_label": "watermark_status",
+          "allowed_values": [
+            "intact",
+            "never_watermarked",
+            "removed",
+            "tampered"
+          ]
+        }
+      },
+      "task_definition": {
+        "positive_class_mapping": [
+          "removed",
+          "tampered"
+        ],
+        "negative_class_mapping": [
+          "intact",
+          "never_watermarked"
+        ]
+      },
+      "attack_families": [
+        "Classical image processing (blurs, noise, affine transforms)",
+        "Compression/transcoding (JPEG re-save at varying quality, resizing + re-encoding)",
+        "Generative/inpainting-based edits (where available from Chapter 4 pipeline)"
+      ]
+    },
+    {
+      "id": "wl-cross-distribution-eval",
+      "description": "Evaluate the same trained models on predefined held-out distributions and attack families to study baseline robustness and failure modes.",
+      "input_source": "Alternative splits or subsets defined in Chapter 4, e.g., `data/ch4_dataset/splits/cross_domain_test.csv`.",
+      "input_constraints": {
+        "distribution_splits": [
+          "clean_synthetic_only",
+          "mixed_real_synthetic",
+          "heavy_attack_subset (strong removal attacks)"
+        ],
+        "label_mapping": "Same as wl-static-image-detection"
+      },
+      "task_definition": "Apply models trained on main training split to these held-out distributions without further fine-tuning; report all evaluation metrics per distribution and attack family."
+    }
+  ],
+  "controls": {
+    "data_controls": {
+      "fixed_splits": "Use precomputed `train_ids.csv`, `val_ids.csv`, `test_ids.csv` shipped with the Chapter 4 dataset to ensure all baselines share identical samples.",
+      "stratification": "Verify equivalent class proportions across train/val/test (within \u00b11% absolute) using a pre-check script.",
+      "label_consistency": "Assert that all examples have a single unambiguous label after mapping status to positive/negative; drop or log any conflicting rows."
+    },
+    "randomness_controls": {
+      "global_seed": 42,
+      "numpy_seed": 42,
+      "python_hash_seed": "0",
+      "sklearn_random_state": 42
+    },
+    "preprocessing_controls": {
+      "image_loading": "Use OpenCV or Pillow with explicit color ordering (BGR\u2192RGB or direct grayscale) documented and fixed.",
+      "resize_policy": "If resizing, use bilinear interpolation for downsampling and bicubic for upsampling; keep consistent across runs.",
+      "color_space": "For most features, use luminance or grayscale; when RGB is used (e.g., for texture), document the channel handling."
+    },
+    "training_controls": {
+      "cross_validation_for_hyperparams": "Use nested or fixed 5-fold cross-validation on training set only; validation/test sets are never used for hyperparameter search.",
+      "class_weights": "Use `class_weight='balanced'` where supported; otherwise, handle imbalance by resampling within training folds only.",
+      "early_stopping": "Not applicable to scikit-learn shallow models except where implemented; if used (e.g., gradient boosting), configure deterministic criteria."
+    },
+    "compute_controls": {
+      "hardware": "CPU-only reference runs; if GPU is available, only used for feature extraction acceleration when numerically equivalent.",
+      "parallelism": "Cap scikit-learn `n_jobs` to a documented value (e.g., 8) for reproducible timing and resource usage."
+    }
+  },
+  "metrics": [
+    {
+      "name": "accuracy",
+      "unit": "fraction (0-1)"
+    },
+    {
+      "name": "precision_positive_class",
+      "unit": "fraction (0-1)"
+    },
+    {
+      "name": "recall_positive_class",
+      "unit": "fraction (0-1)"
+    },
+    {
+      "name": "f1_positive_class",
+      "unit": "fraction (0-1)"
+    },
+    {
+      "name": "roc_auc",
+      "unit": "fraction (0-1)"
+    },
+    {
+      "name": "pr_auc_positive_class",
+      "unit": "fraction (0-1)"
+    },
+    {
+      "name": "false_positive_rate",
+      "unit": "fraction (0-1)"
+    },
+    {
+      "name": "false_negative_rate",
+      "unit": "fraction (0-1)"
+    },
+    {
+      "name": "brier_score",
+      "unit": "mean squared error of probabilistic predictions"
+    },
+    {
+      "name": "inference_time_per_image",
+      "unit": "milliseconds/image"
+    },
+    {
+      "name": "feature_extraction_time_per_image",
+      "unit": "milliseconds/image"
+    },
+    {
+      "name": "model_size",
+      "unit": "megabytes"
+    },
+    {
+      "name": "feature_importance_gini",
+      "unit": "unitless importance scores normalized to sum to 1 (for tree ensembles)"
+    },
+    {
+      "name": "coefficients_magnitude_logreg",
+      "unit": "absolute coefficient values per feature (unitless, feature-scale dependent)"
+    }
+  ],
+  "success_criteria": {
+    "primary": [
+      {
+        "description": "For at least one forensic-feature treatment model, achieve statistically significant improvement over the pixel-only logistic regression baseline on ROC-AUC and F1 for the positive (watermark-removed) class on the main test set.",
+        "statistical_test": "Two-sided DeLong test for ROC-AUC difference; bootstrap confidence intervals for F1 difference.",
+        "thresholds": {
+          "roc_auc_improvement_min": 0.05,
+          "f1_improvement_min": 0.05,
+          "p_value_max": 0.01
+        }
+      }
+    ],
+    "secondary": [
+      {
+        "description": "Identify at least three distinct, interpretable feature groups (e.g., noise, edges, texture, compression, frequency) that show non-trivial importance or coefficient magnitude and that correlate with specific attack types or content categories.",
+        "operationalization": "Analyze learned coefficients (logistic regression) and feature importances (Random Forest/Gradient Boosting), cluster by feature group, and document patterns in the experiment report."
+      },
+      {
+        "description": "Demonstrate reproducibility of metrics across reruns within narrow bounds.",
+        "operationalization": "Repeat full training + evaluation pipeline 3 times with same seeds and environment; require variation in ROC-AUC and F1 to be \u2264 0.01 absolute across runs."
+      }
+    ],
+    "guardrails": [
+      {
+        "description": "Ensure false positive rate on clearly negative samples (intact or never-watermarked images without any watermark-related processing) stays below a risk-aware threshold to avoid unrealistic baselines.",
+        "thresholds": {
+          "fpr_on_clean_negative_subset_max": 0.2
+        }
+      }
+    ]
+  },
+  "failure_modes": [
+    {
+      "name": "Overfitting to specific watermarking/removal pipeline artifacts",
+      "description": "Models may learn idiosyncratic signatures of the synthetic watermark embedding or removal implementation from Chapter 4 rather than generalizable cues, leading to degraded performance on the cross-distribution workload or new attack families.",
+      "detection": "Significant drop in ROC-AUC or F1 (>0.15 absolute) when comparing main test set vs. cross-distribution test subsets."
+    },
+    {
+      "name": "Content-type bias",
+      "description": "Models might key on content category (e.g., photos vs. graphics) if watermarking/removal distributions differ across categories.",
+      "detection": "Per-category stratified metrics reveal large performance disparities; e.g., recall difference >0.2 between content types."
+    },
+    {
+      "name": "Label leakage via preprocessing or metadata",
+      "description": "If file naming, resolution, or compression level correlates strongly with label, models might exploit these rather than true forensic cues.",
+      "detection": "Simple baselines using only trivial metadata (resolution, file size, JPEG quality estimate) achieving similar performance to full forensic models."
+    },
+    {
+      "name": "Non-reproducible results due to nondeterminism",
+      "description": "Differences in BLAS backends, library versions, or parallelism settings may cause small numeric differences that accumulate in model selection.",
+      "detection": "More than \u00b10.02 absolute variation in ROC-AUC or F1 across three independent runs in an ostensibly identical environment."
+    },
+    {
+      "name": "Spurious feature correlations masking true signal",
+      "description": "Highly correlated feature groups (e.g., overlapping texture and noise metrics) can make interpretation of individual feature importance misleading.",
+      "detection": "High pairwise feature correlations (|r|>0.9) combined with unstable importance rankings across bootstrap resamples."
+    }
+  ],
+  "required_environment": {
+    "os": [
+      "Ubuntu 20.04 LTS or later",
+      "macOS 12+",
+      "Windows 10/11 (WSL2 recommended)"
+    ],
+    "languages_and_runtimes": {
+      "python": "3.10.x (recommended); minimum 3.8"
+    },
+    "python_dependencies": [
+      "numpy>=1.24.0",
+      "scipy>=1.10.0",
+      "pandas>=2.0.0",
+      "scikit-learn>=1.3.0",
+      "opencv-python>=4.8.0.0",
+      "scikit-image>=0.21.0",
+      "matplotlib>=3.7.0",
+      "seaborn>=0.12.0",
+      "pyyaml>=6.0",
+      "tqdm>=4.65.0",
+      "joblib>=1.3.0"
+    ],
+    "repository_layout": {
+      "root": "https://github.com/bookauthority/ai-watermark-removal-detection",
+      "paths": {
+        "dataset_pipeline": "datasets/ch4_watermark_detection/",
+        "baseline_experiments": "experiments/ch5_baseline_classical/",
+        "configs": "experiments/ch5_baseline_classical/configs/",
+        "feature_extractors": "experiments/ch5_baseline_classical/features/",
+        "models": "experiments/ch5_baseline_classical/models/",
+        "ci": ".github/workflows/ch5_baselines.yml"
+      }
+    },
+    "hardware": {
+      "cpu": "4+ physical cores recommended",
+      "ram": "16 GB minimum recommended for comfortable operation",
+      "disk_space": "At least 20 GB free for datasets, intermediate features, and artifacts",
+      "gpu": "Optional; not required for core experiment"
+    },
+    "reproducibility_artifacts": {
+      "environment_file": "environment.yml or requirements.txt at repo root specifying exact versions.",
+      "docker": "Optional Dockerfile in `infra/docker/ch5_baselines.Dockerfile` with pinned OS and dependencies.",
+      "ci_checks": "GitHub Actions workflow to run smoke tests (`pytest` or equivalent) on feature extraction and a small training subset."
+    }
+  },
+  "run_instructions": {
+    "prerequisites": [
+      "Clone the repository: `git clone https://github.com/bookauthority/ai-watermark-removal-detection.git`",
+      "Change directory: `cd ai-watermark-removal-detection`",
+      "Create Python environment (example with venv): `python3 -m venv .venv && source .venv/bin/activate`",
+      "Install dependencies: `pip install -r requirements.txt` or `conda env create -f environment.yml` followed by `conda activate ai-watermark-detection`"
+    ],
+    "dataset_preparation": [
+      "Generate or download the Chapter 4 dataset according to its instructions:",
+      "`python datasets/ch4_watermark_detection/build_dataset.py --config datasets/ch4_watermark_detection/configs/default.yaml`",
+      "Verify dataset manifests and splits:",
+      "`python datasets/ch4_watermark_detection/validate_dataset.py --root data/ch4_dataset/`"
+    ],
+    "feature_extraction": [
+      "Navigate to Chapter 5 experiment directory:",
+      "`cd experiments/ch5_baseline_classical`",
+      "Run feature extraction for baseline pixel-only representation:",
+      "`python features/extract_features.py --config configs/pixel_baseline.yaml`",
+      "Run feature extraction for forensic feature sets (noise, edges, texture, compression, frequency):",
+      "`python features/extract_features.py --config configs/forensic_full.yaml`",
+      "Optional: Run additional configs for ablation studies (e.g., only-noise, only-frequency):",
+      "`python features/extract_features.py --config configs/forensic_noise_only.yaml`"
+    ],
+    "model_training": [
+      "Train the pixel-only logistic regression baseline:",
+      "`python train.py --config configs/model_pixel_logreg.yaml`",
+      "Train forensic-feature logistic regression, SVMs, and tree ensembles:",
+      "`python train.py --config configs/model_forensic_logreg.yaml`",
+      "`python train.py --config configs/model_forensic_linear_svm.yaml`",
+      "`python train.py --config configs/model_forensic_rbf_svm.yaml`",
+      "`python train.py --config configs/model_forensic_random_forest.yaml`",
+      "`python train.py --config configs/model_forensic_gb.yaml`"
+    ],
+    "evaluation_and_reporting": [
+      "Evaluate all trained models on the main test set and cross-distribution splits:",
+      "`python evaluate.py --config configs/eval_main_and_shifts.yaml`",
+      "Generate plots (ROC, PR curves, feature importance, confusion matrices) and a summary report:",
+      "`python report.py --config configs/report_ch5_baselines.yaml`",
+      "All artifacts (metrics JSON, plots, model weights) will be stored under `experiments/ch5_baseline_classical/artifacts/<run_id>/`."
+    ],
+    "ci_and_reproducibility_checks": [
+      "Run smoke tests on a small subset to validate pipeline integrity:",
+      "`pytest tests/test_ch5_baselines.py`",
+      "Optional: Trigger the dedicated CI workflow locally via `act` (if configured) or push changes to run GitHub Actions `.github/workflows/ch5_baselines.yml`."
+    ]
+  },
+  "evidence_schema": {
+    "metrics_file": {
+      "path_pattern": "experiments/ch5_baseline_classical/artifacts/{run_id}/metrics_{split}.json",
+      "description": "Per-model, per-split metrics recorded as structured JSON.",
+      "schema": {
+        "run_id": "string (UUID or timestamp-based slug)",
+        "model_id": "string (e.g., 'baseline-pixel-logreg', 'treatment-rbf-svm-forensic')",
+        "split": "string ('train', 'val', 'test', 'cross_domain_test_*')",
+        "global_metrics": {
+          "accuracy": "float",
+          "precision_positive_class": "float",
+          "recall_positive_class": "float",
+          "f1_positive_class": "float",
+          "roc_auc": "float",
+          "pr_auc_positive_class": "float",
+          "false_positive_rate": "float",
+          "false_negative_rate": "float",
+          "brier_score": "float"
+        },
+        "timing": {
+          "inference_time_per_image_ms": "float",
+          "feature_extraction_time_per_image_ms": "float"
+        },
+        "model_characteristics": {
+          "model_size_mb": "float",
+          "num_parameters": "integer (if applicable)"
+        },
+        "confidence_intervals": {
+          "roc_auc_95_ci": [
+            "float",
+            "float"
+          ],
+          "f1_positive_class_95_ci": [
+            "float",
+            "float"
+          ]
+        }
+      }
+    },
+    "feature_importance_file": {
+      "path_pattern": "experiments/ch5_baseline_classical/artifacts/{run_id}/feature_importance_{model_id}.json",
+      "description": "Feature importance and coefficient information used for interpretability analyses.",
+      "schema": {
+        "run_id": "string",
+        "model_id": "string",
+        "feature_names": [
+          "string"
+        ],
+        "importance_values": [
+          "float"
+        ],
+        "groups": {
+          "feature_name": "group_label (e.g., 'noise', 'edges', 'texture', 'compression', 'frequency')"
+        },
+        "metadata": {
+          "importance_type": "string ('gini', 'gain', 'coefficient_magnitude')"
+        }
+      }
+    },
+    "config_file": {
+      "path_pattern": "experiments/ch5_baseline_classical/artifacts/{run_id}/config_used.yaml",
+      "description": "Frozen configuration capturing all hyperparameters, seeds, paths, and model definitions for exact reproducibility.",
+      "schema": "Arbitrary YAML/JSON; must include: dataset paths, feature set names, model hyperparameters, random seed, and git commit hash."
+    },
+    "logs_file": {
+      "path_pattern": "experiments/ch5_baseline_classical/artifacts/{run_id}/train_log.txt",
+      "description": "Plain-text logs capturing command-line invocation, environment info (OS, Python, library versions), and per-epoch or per-fold training/evaluation summaries.",
+      "schema": "Unstructured text with prefixed timestamps and log levels."
+    },
+    "plots": {
+      "paths": [
+        "experiments/ch5_baseline_classical/artifacts/{run_id}/roc_curve_{model_id}_{split}.png",
+        "experiments/ch5_baseline_classical/artifacts/{run_id}/pr_curve_{model_id}_{split}.png",
+        "experiments/ch5_baseline_classical/artifacts/{run_id}/confusion_matrix_{model_id}_{split}.png",
+        "experiments/ch5_baseline_classical/artifacts/{run_id}/feature_importance_{model_id}.png"
+      ],
+      "description": "Visual evidence of classifier behavior and feature contributions.",
+      "schema": "Image files (PNG) with standard resolution and embedded legends/axes labels."
+    }
+  }
+}
